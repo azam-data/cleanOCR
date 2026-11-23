@@ -228,7 +228,7 @@ mod tests {
                             col_span: 2,
                             is_header: true,
                             bbox: b,
-                            text: "Metrics \x26amp; Scores".to_string(),
+                            text: "Metrics & Scores".to_string(),
                         },
                         TableCell {
                             row: 1,
