@@ -77,15 +77,6 @@ pub fn sort_reading_order_with_config(blocks: &mut Vec<Block>, config: &ReadingO
 }
 
 /// Recursively partitions a set of body block indices using projection-profile valleys.
-///
-/// Strategy:
-/// - If a valid vertical gutter (`>= min_gutter`) spans the entire subset (meaning no block
-///   bridges across the gutter), cut vertically into columns first so aligned rows across
-///   columns are never interleaved.
-/// - Otherwise (e.g., when a full-width title, banner, or table bridges across columns),
-///   cut horizontally along whitespace valleys to peel off full-width bands first.
-/// - If neither axis has a valley wider than `min_gutter`, fall back to deterministic
-///   top-to-bottom, left-to-right ordering.
 fn xy_cut_recursive(
     blocks: &[Block],
     indices: &[usize],
@@ -143,10 +134,9 @@ fn xy_cut_recursive(
             bands[band_idx].push(idx);
         }
 
-        for band in bands {
-            if band.is_empty() {
-                continue;
-            }
+        // Re-merge adjacent horizontal bands whose union exposes a valid vertical column gutter
+        // so aligned paragraphs across columns are never interleaved row-by-row.
+        for band in merge_columnar_bands(blocks, bands, min_gutter) {
             xy_cut_recursive(blocks, &band, min_gutter, inherited_col, out);
         }
         return;
@@ -158,6 +148,33 @@ fn xy_cut_recursive(
     for idx in fallback {
         out.push((idx, inherited_col));
     }
+}
+
+/// Merges adjacent horizontal bands whenever their combined X-projection has a vertical gutter.
+/// Guaranteed to terminate because `indices` itself had no vertical gutter.
+fn merge_columnar_bands(
+    blocks: &[Block],
+    bands: Vec<Vec<usize>>,
+    min_gutter: f32,
+) -> Vec<Vec<usize>> {
+    let mut merged: Vec<Vec<usize>> = Vec::new();
+    for band in bands {
+        if band.is_empty() {
+            continue;
+        }
+        if let Some(last) = merged.last_mut() {
+            let combined_x = last
+                .iter()
+                .chain(band.iter())
+                .map(|&i| (blocks[i].bbox.x0, blocks[i].bbox.x1));
+            if !find_projection_cuts(combined_x, min_gutter).is_empty() {
+                last.extend(band);
+                continue;
+            }
+        }
+        merged.push(band);
+    }
+    merged
 }
 
 /// Computes sorted midpoint coordinates of all whitespace valleys `>= min_gutter`
@@ -275,6 +292,28 @@ mod tests {
             cols,
             vec![None, None, Some(0), Some(0), Some(1), Some(1), None]
         );
+    }
+
+    #[test]
+    fn two_column_page_with_bottom_spanning_band_does_not_interleave() {
+        let mut blocks = vec![
+            make_para("bottom_span", 0.10, 0.76, 0.90, 0.88),
+            make_para("right_2", 0.54, 0.46, 0.90, 0.70),
+            make_para("left_2", 0.10, 0.46, 0.46, 0.70),
+            make_para("right_1", 0.54, 0.21, 0.90, 0.41),
+            make_para("left_1", 0.10, 0.21, 0.46, 0.41),
+        ];
+
+        sort_reading_order(&mut blocks);
+
+        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["left_1", "left_2", "right_1", "right_2", "bottom_span"]
+        );
+
+        let cols: Vec<Option<u8>> = blocks.iter().map(|b| b.column_index).collect();
+        assert_eq!(cols, vec![Some(0), Some(0), Some(1), Some(1), None]);
     }
 
     #[test]
