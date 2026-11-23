@@ -629,11 +629,11 @@ fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
-            '&' => out.push_str("&"),
-            '<' => out.push_str("<"),
-            '>' => out.push_str(">"),
-            '"' => out.push_str("""),
-            '\'' => out.push_str("'"),
+            '&' => out.push_str("\x26amp;"),
+            '<' => out.push_str("\x26lt;"),
+            '>' => out.push_str("\x26gt;"),
+            '"' => out.push_str("\x26quot;"),
+            '\'' => out.push_str("\x26#39;"),
             _ => out.push(ch),
         }
     }
@@ -786,3 +786,4 @@ mod tests {
         assert_eq!(extracted, ir);
     }
 }
+
