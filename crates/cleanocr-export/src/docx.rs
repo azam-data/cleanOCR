@@ -4,7 +4,9 @@ use std::io::Cursor;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use cleanocr_ir::{Block, BlockKind, DocumentIr, PageIr, TableCell as IrTableCell, TableIr, TextLine, TextSpan};
+use cleanocr_ir::{
+    Block, BlockKind, DocumentIr, PageIr, TableCell as IrTableCell, TableIr, TextLine, TextSpan,
+};
 use docx_rs::{BreakType, Docx, Paragraph, Pic, Run, Table, TableCell, TableRow, VMergeType};
 
 use crate::latex_math::validate_latex_math;
@@ -48,9 +50,8 @@ pub fn build_docx_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<
 
     for (idx, page) in ir.pages.iter().enumerate() {
         if idx > 0 {
-            docx = docx.add_paragraph(
-                Paragraph::new().add_run(Run::new().add_break(BreakType::Page)),
-            );
+            docx =
+                docx.add_paragraph(Paragraph::new().add_run(Run::new().add_break(BreakType::Page)));
         }
         docx = append_page(docx, page, &figure_map);
     }
@@ -62,22 +63,14 @@ pub fn build_docx_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<
     Ok(cursor.into_inner())
 }
 
-fn append_page(
-    mut docx: Docx,
-    page: &PageIr,
-    figures: &BTreeMap<String, Vec<u8>>,
-) -> Docx {
+fn append_page(mut docx: Docx, page: &PageIr, figures: &BTreeMap<String, Vec<u8>>) -> Docx {
     for block in &page.blocks {
         docx = append_block(docx, block, figures);
     }
     docx
 }
 
-fn append_block(
-    mut docx: Docx,
-    block: &Block,
-    figures: &BTreeMap<String, Vec<u8>>,
-) -> Docx {
+fn append_block(mut docx: Docx, block: &Block, figures: &BTreeMap<String, Vec<u8>>) -> Docx {
     match &block.kind {
         BlockKind::Heading { level, lines } => {
             let size = match level {
@@ -138,9 +131,8 @@ fn append_block(
                 let pic = Pic::new(img_bytes.as_slice());
                 docx = docx.add_paragraph(Paragraph::new().add_run(Run::new().add_image(pic)));
             } else {
-                docx = docx.add_paragraph(
-                    Paragraph::new().add_run(Run::new().add_text(latex.trim())),
-                );
+                docx =
+                    docx.add_paragraph(Paragraph::new().add_run(Run::new().add_text(latex.trim())));
             }
         }
         BlockKind::Figure {
@@ -290,8 +282,7 @@ fn build_table(table: &TableIr) -> Option<Table> {
                     if cell.is_header {
                         run = run.bold();
                     }
-                    let mut tc =
-                        TableCell::new().add_paragraph(Paragraph::new().add_run(run));
+                    let mut tc = TableCell::new().add_paragraph(Paragraph::new().add_run(run));
                     if cs > 1 {
                         tc = tc.grid_span(cs);
                     }
@@ -331,9 +322,9 @@ mod tests {
 
     /// Valid 1x1 white RGB PNG image for offline OOXML media embedding tests.
     const PNG_1X1: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
-        2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255,
-        63, 0, 5, 254, 2, 254, 13, 239, 70, 184, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2,
+        0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63,
+        0, 5, 254, 2, 254, 13, 239, 70, 184, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
 
     #[test]

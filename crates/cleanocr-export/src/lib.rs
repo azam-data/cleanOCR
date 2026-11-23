@@ -19,7 +19,9 @@ use cleanocr_mrc::MrcLayers;
 pub use docx::{DocxExporter, build_docx_bytes};
 pub use html::{HtmlExporter, extract_ir_from_html, render_html};
 pub use latex::{LatexExporter, render_latex};
-pub use latex_math::{MathValidationError, escape_latex, sanitize_tex_comment, validate_latex_math};
+pub use latex_math::{
+    MathValidationError, escape_latex, sanitize_tex_comment, validate_latex_math,
+};
 pub use latex_pgfplots::{emit_pgfplots, is_supported_pgfplots_chart};
 pub use markdown::{MarkdownExporter, render_markdown};
 pub use pdf::{PdfExporter, bbox_to_pdf_rect, build_pdf_bytes, extract_ir_from_pdf};
@@ -59,8 +61,9 @@ pub fn extract_ir_from_file(input_path: &Path) -> Result<DocumentIr> {
     }
 
     if matches!(ext.as_deref(), Some("html" | "htm")) {
-        let html = String::from_utf8(bytes)
-            .with_context(|| format!("archived HTML is not valid UTF-8: {}", input_path.display()))?;
+        let html = String::from_utf8(bytes).with_context(|| {
+            format!("archived HTML is not valid UTF-8: {}", input_path.display())
+        })?;
         return extract_ir_from_html(&html);
     }
 
@@ -88,9 +91,9 @@ mod tests {
     };
 
     const PNG_1X1: &[u8] = &[
-        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8,
-        2, 0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255,
-        63, 0, 5, 254, 2, 254, 13, 239, 70, 184, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 2,
+        0, 0, 0, 144, 119, 83, 222, 0, 0, 0, 12, 73, 68, 65, 84, 120, 156, 99, 248, 255, 255, 63,
+        0, 5, 254, 2, 254, 13, 239, 70, 184, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
 
     fn rich_fixture(include_charts: bool) -> (DocumentIr, Vec<PageVisualAssets>) {

@@ -147,7 +147,11 @@ pub fn render_html(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<Strin
     if let Some(title) = &ir.metadata.title
         && !title.trim().is_empty()
     {
-        let _ = writeln!(out, "    <h1 class=\"doc-title\">{}</h1>", escape_html(title));
+        let _ = writeln!(
+            out,
+            "    <h1 class=\"doc-title\">{}</h1>",
+            escape_html(title)
+        );
     }
     for (idx, page) in ir.pages.iter().enumerate() {
         if idx > 0 {
@@ -372,11 +376,7 @@ fn render_replica_lines(lines: &[TextLine], out: &mut String) {
     }
 }
 
-fn render_reader_page(
-    page: &PageIr,
-    all_figures: &BTreeMap<&str, &[u8]>,
-    out: &mut String,
-) {
+fn render_reader_page(page: &PageIr, all_figures: &BTreeMap<&str, &[u8]>, out: &mut String) {
     let _ = writeln!(
         out,
         "    <section class=\"page-reader\" data-page=\"{}\">",
@@ -407,19 +407,11 @@ fn render_reader_page(
     let _ = writeln!(out, "    </section>");
 }
 
-fn render_reader_block(
-    block: &Block,
-    all_figures: &BTreeMap<&str, &[u8]>,
-    out: &mut String,
-) {
+fn render_reader_block(block: &Block, all_figures: &BTreeMap<&str, &[u8]>, out: &mut String) {
     match &block.kind {
         BlockKind::Heading { level, lines } => {
             let tag = (*level).clamp(1, 6);
-            let _ = writeln!(
-                out,
-                "      <h{tag}>{}</h{tag}>",
-                render_reader_lines(lines)
-            );
+            let _ = writeln!(out, "      <h{tag}>{}</h{tag}>", render_reader_lines(lines));
         }
         BlockKind::Paragraph { lines } => {
             let body = render_reader_lines(lines);
@@ -786,4 +778,3 @@ mod tests {
         assert_eq!(extracted, ir);
     }
 }
-

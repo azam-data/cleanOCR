@@ -122,7 +122,9 @@ fn render_block(block: &Block, out: &mut String) {
             fallback_asset_id,
         } => {
             if validate_latex_math(latex).is_ok() {
-                let _ = writeln!(out, "$$"); let _ = writeln!(out, "{}", latex.trim()); let _ = writeln!(out, "$$");
+                let _ = writeln!(out, "$$");
+                let _ = writeln!(out, "{}", latex.trim());
+                let _ = writeln!(out, "$$");
                 let _ = writeln!(out);
             } else if let Some(asset_id) = fallback_asset_id {
                 let _ = writeln!(out, "![Formula](assets/{asset_id}.png)");
@@ -211,10 +213,7 @@ fn render_table(table: &TableIr, out: &mut String) {
         return;
     }
 
-    let has_spans = table
-        .cells
-        .iter()
-        .any(|c| c.row_span > 1 || c.col_span > 1);
+    let has_spans = table.cells.iter().any(|c| c.row_span > 1 || c.col_span > 1);
 
     if has_spans {
         render_html_table(table, out);
@@ -599,4 +598,3 @@ mod tests {
         assert!(md.contains("1. **First item**"));
     }
 }
-

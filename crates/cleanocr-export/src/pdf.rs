@@ -32,7 +32,11 @@ impl RefAllocator {
 /// `(x_ll, y_ll, width_pt, height_pt)`.
 ///
 /// This is the ONLY module in the workspace permitted to flip the Y-axis into PDF space.
-pub fn bbox_to_pdf_rect(bbox: BBox, page_width_pt: f32, page_height_pt: f32) -> (f32, f32, f32, f32) {
+pub fn bbox_to_pdf_rect(
+    bbox: BBox,
+    page_width_pt: f32,
+    page_height_pt: f32,
+) -> (f32, f32, f32, f32) {
     let x_ll = bbox.x0 * page_width_pt;
     let y_ll = page_height_pt - (bbox.y1 * page_height_pt);
     let width_pt = bbox.width() * page_width_pt;
@@ -293,10 +297,7 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
     {
         let mut catalog = pdf.catalog(catalog_id);
         catalog.pages(page_tree_id);
-        catalog
-            .insert(Name(b"AF"))
-            .array()
-            .item(ir_filespec_id);
+        catalog.insert(Name(b"AF")).array().item(ir_filespec_id);
 
         {
             let mut names = catalog.insert(Name(b"Names")).dict();
@@ -332,9 +333,8 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
 
 /// Extracts the embedded `cleanocr-ir.json` stream from an archived cleanOCR PDF/A-3 file.
 pub fn extract_ir_from_pdf(pdf_bytes: &[u8]) -> Result<DocumentIr> {
-    let stream_obj_num = find_embedded_ir_stream_obj(pdf_bytes).ok_or_else(|| {
-        anyhow!("embedded '{EMBEDDED_IR_FILENAME}' attachment not found in PDF")
-    })?;
+    let stream_obj_num = find_embedded_ir_stream_obj(pdf_bytes)
+        .ok_or_else(|| anyhow!("embedded '{EMBEDDED_IR_FILENAME}' attachment not found in PDF"))?;
     let payload = extract_stream_bytes(pdf_bytes, stream_obj_num)?;
     serde_json::from_slice(payload)
         .context("failed to deserialize embedded DocumentIr JSON from PDF")
@@ -483,9 +483,7 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<(i32, i32)> {
         if seg_len < 2 || i + seg_len > data.len() {
             break;
         }
-        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF)
-            && seg_len >= 7
-        {
+        if matches!(marker, 0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF) && seg_len >= 7 {
             let h = u16::from_be_bytes([data[i + 3], data[i + 4]]) as i32;
             let w = u16::from_be_bytes([data[i + 5], data[i + 6]]) as i32;
             if w > 0 && h > 0 {
@@ -594,9 +592,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use cleanocr_ir::{
-        DocumentMetadata, IR_SCHEMA_VERSION, PageIngestMode, TextSource, TextSpan,
-    };
+    use cleanocr_ir::{DocumentMetadata, IR_SCHEMA_VERSION, PageIngestMode, TextSource, TextSpan};
     use cleanocr_mrc::MrcLayers;
 
     #[test]

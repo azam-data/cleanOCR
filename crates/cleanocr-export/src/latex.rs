@@ -40,11 +40,14 @@ impl Exporter for LatexExporter {
                 fs::create_dir_all(parent)?;
             }
             let file = fs::File::create(output_path).with_context(|| {
-                format!("failed to create LaTeX zip bundle {}", output_path.display())
+                format!(
+                    "failed to create LaTeX zip bundle {}",
+                    output_path.display()
+                )
             })?;
             let mut zip = zip::ZipWriter::new(file);
-            let opts = SimpleFileOptions::default()
-                .compression_method(zip::CompressionMethod::Deflated);
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
             zip.start_file("main.tex", opts)?;
             zip.write_all(tex.as_bytes())?;
@@ -372,7 +375,9 @@ fn render_table(table: &TableIr, tex: &mut String) {
 
                 let content = escape_latex(cell.text.trim());
                 let formatted = match (rs > 1, cs > 1) {
-                    (true, true) => format!(r"\multicolumn{{{cs}}}{{l}}{{\multirow{{{rs}}}{{*}}{{{content}}}}}"),
+                    (true, true) => {
+                        format!(r"\multicolumn{{{cs}}}{{l}}{{\multirow{{{rs}}}{{*}}{{{content}}}}}")
+                    }
                     (false, true) => format!(r"\multicolumn{{{cs}}}{{l}}{{{content}}}"),
                     (true, false) => format!(r"\multirow{{{rs}}}{{*}}{{{content}}}"),
                     (false, false) => content,

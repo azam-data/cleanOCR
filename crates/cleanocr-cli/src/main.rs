@@ -451,7 +451,7 @@ mod tests {
 
         let base_dir =
             std::env::temp_dir().join(format!("cleanocr_cli_convert_ir_{}", std::process::id()));
-        
+
         let _ = fs::remove_dir_all(&base_dir);
         fs::create_dir_all(&base_dir).expect("create temp dir");
 

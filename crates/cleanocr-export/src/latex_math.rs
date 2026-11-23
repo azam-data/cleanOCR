@@ -180,22 +180,17 @@ mod tests {
     #[test]
     fn escapes_all_ten_latex_special_characters() {
         let raw = r"\{}$&#^_%~";
-        let expected =
-            r"\textbackslash{}\{\}\$\&\#\textasciicircum{}\_\%\textasciitilde{}";
+        let expected = r"\textbackslash{}\{\}\$\&\#\textasciicircum{}\_\%\textasciitilde{}";
         assert_eq!(escape_latex(raw), expected);
     }
 
     #[test]
     fn accepts_valid_complex_formulas() {
         assert!(validate_latex_math(r"\int_0^1 x^2 \, dx = \frac{1}{3}").is_ok());
+        assert!(validate_latex_math(r"\left( \frac{a + b}{c} \right) = \{1, 2\}").is_ok());
         assert!(
-            validate_latex_math(r"\left( \frac{a + b}{c} \right) = \{1, 2\}").is_ok()
-        );
-        assert!(
-            validate_latex_math(
-                r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix} % matrix comment"
-            )
-            .is_ok()
+            validate_latex_math(r"\begin{pmatrix} 1 & 2 \\ 3 & 4 \end{pmatrix} % matrix comment")
+                .is_ok()
         );
         // `\\}` closes the group after a line break (not an escaped brace).
         assert!(validate_latex_math(r"\text{a \\}").is_ok());
