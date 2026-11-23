@@ -228,7 +228,7 @@ mod tests {
                             col_span: 2,
                             is_header: true,
                             bbox: b,
-                            text: "Metrics & Scores".to_string(),
+                            text: "Metrics \x26amp; Scores".to_string(),
                         },
                         TableCell {
                             row: 1,
@@ -451,7 +451,7 @@ mod tests {
         assert!(md.contains(r"$x^2 + y^2 = r^2$"));
         assert!(md.contains("Broken inline a_b & c"));
         assert!(md.contains("![Formula](assets/eq_bad_png.png)"));
-        assert!(md.contains("<th colspan=\"2\">Metrics & Scores</th>"));
+        assert!(md.contains("<th colspan=\"2\">Metrics \x26amp; Scores</th>"));
 
         // 3. HTML5: checks dual mode + lossless DocumentIr round-trip
         let html = render_html(&ir, &assets).expect("render HTML");
@@ -472,7 +472,7 @@ mod tests {
             .read_to_string(&mut xml)
             .expect("read document.xml");
         assert!(xml.contains("Milestone 2 Golden Fixture"));
-        assert!(xml.contains("Metrics & Scores"));
+        assert!(xml.contains("Metrics \x26amp; Scores"));
     }
 
     #[test]
