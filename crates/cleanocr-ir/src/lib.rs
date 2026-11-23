@@ -1,0 +1,1 @@
+//! Canonical Document Intermediate Representation (IR) for cleanOCR.

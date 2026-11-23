@@ -1,0 +1,1 @@
+fn main() {    println!("cleanOCR CLI skeleton initialized.");}
