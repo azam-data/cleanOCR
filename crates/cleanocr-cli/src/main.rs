@@ -2,6 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use cleanocr_export::{
+    DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PdfExporter,
+    extract_ir_from_file,
+};
 use cleanocr_ir::IR_SCHEMA_VERSION;
 use tracing_subscriber::EnvFilter;
 
@@ -192,6 +196,28 @@ fn validate_scan_args(args: &ScanArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_convert_ir(args: &ConvertIrArgs) -> Result<()> {
+    let ir = extract_ir_from_file(&args.input)?;
+    let empty_assets = Vec::new();
+
+    match args.format {
+        OutputFormat::Pdf => PdfExporter.export(&ir, &empty_assets, &args.out)?,
+        OutputFormat::Html => HtmlExporter.export(&ir, &empty_assets, &args.out)?,
+        OutputFormat::Tex => LatexExporter.export(&ir, &empty_assets, &args.out)?,
+        OutputFormat::Md => MarkdownExporter.export(&ir, &empty_assets, &args.out)?,
+        OutputFormat::Docx => DocxExporter.export(&ir, &empty_assets, &args.out)?,
+    }
+
+    tracing::info!(
+        input = %args.input.display(),
+        format = ?args.format,
+        out = %args.out.display(),
+        pages = ir.pages.len(),
+        "Re-exported DocumentIr successfully"
+    );
+    Ok(())
+}
+
 fn run_doctor() {
     println!("cleanOCR Doctor");
     println!("  Engine version    : {}", env!("CARGO_PKG_VERSION"));
@@ -217,18 +243,10 @@ fn run(cli: Cli) -> Result<()> {
             );
             bail!(
                 "End-to-end `process` pipeline is not yet wired \
-                 (scheduled for Milestones 2-5)."
+                 (scheduled for Milestones 3-5)."
             );
         }
-        Command::ConvertIr(args) => {
-            tracing::info!(
-                input = %args.input.display(),
-                format = ?args.format,
-                out = %args.out.display(),
-                "Validated convert-ir arguments"
-            );
-            bail!("`convert-ir` command is not yet wired (scheduled for Milestone 2).");
-        }
+        Command::ConvertIr(args) => run_convert_ir(&args),
         Command::Doctor => {
             run_doctor();
             Ok(())
@@ -256,6 +274,13 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use cleanocr_ir::{
+        BBox, Block, BlockKind, DocumentIr, DocumentMetadata, PageIngestMode, PageIr, TextLine,
+        TextSource, TextSpan,
+    };
+
     use super::*;
 
     #[test]
@@ -377,6 +402,95 @@ mod tests {
 
         let doctor_cli = Cli::try_parse_from(["cleanocr", "doctor"]).expect("parse doctor");
         run(doctor_cli).expect("doctor command succeeds");
+    }
+
+    #[test]
+    fn convert_ir_reexports_from_archived_pdf_and_html() {
+        let bbox = BBox::new(0.1, 0.1, 0.9, 0.16);
+        let ir = DocumentIr {
+            schema_version: IR_SCHEMA_VERSION.to_string(),
+            metadata: DocumentMetadata {
+                title: Some("CLI Convert-IR Roundtrip".to_string()),
+                source_sha256: "123456".to_string(),
+                source_filename: Some("demo.pdf".to_string()),
+                detected_languages: vec!["en".to_string()],
+                created_utc: "2026-11-23T00:00:00Z".to_string(),
+                engine_version: "0.1.0".to_string(),
+            },
+            pages: vec![PageIr {
+                page_index: 0,
+                width_pt: 595.0,
+                height_pt: 842.0,
+                dpi: 300,
+                ingest_mode: PageIngestMode::DigitalNativeText,
+                blocks: vec![Block {
+                    id: "p0_b0".to_string(),
+                    bbox,
+                    reading_order: 0,
+                    column_index: None,
+                    confidence: 0.99,
+                    kind: BlockKind::Paragraph {
+                        lines: vec![TextLine {
+                            bbox,
+                            spans: vec![TextSpan {
+                                text: "Lossless re-export works.".to_string(),
+                                bbox,
+                                confidence: 0.99,
+                                is_bold: false,
+                                is_italic: false,
+                                inline_math_latex: None,
+                                source: TextSource::NativePdf,
+                            }],
+                        }],
+                    },
+                }],
+                overlays: Vec::new(),
+                low_confidence_flags: Vec::new(),
+            }],
+        };
+
+        let base_dir = std::env::temp_dir().join(format!(
+            "cleanocr_cli_convert_ir_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base_dir);
+        fs::create_dir_all(&base_dir).expect("create temp dir");
+
+        let archived_pdf = base_dir.join("archived.pdf");
+        let archived_html = base_dir.join("archived.html");
+        let out_tex_dir = base_dir.join("out_tex");
+        let out_md_file = base_dir.join("out.md");
+
+        PdfExporter
+            .export(&ir, &[], &archived_pdf)
+            .expect("export archived PDF");
+        HtmlExporter
+            .export(&ir, &[], &archived_html)
+            .expect("export archived HTML");
+
+        run_convert_ir(&ConvertIrArgs {
+            input: archived_pdf,
+            format: OutputFormat::Tex,
+            out: out_tex_dir.clone(),
+        })
+        .expect("convert-ir from PDF to TeX");
+
+        run_convert_ir(&ConvertIrArgs {
+            input: archived_html,
+            format: OutputFormat::Md,
+            out: out_md_file.clone(),
+        })
+        .expect("convert-ir from HTML to Markdown");
+
+        let tex = fs::read_to_string(out_tex_dir.join("main.tex")).expect("read main.tex");
+        assert!(tex.contains("CLI Convert-IR Roundtrip"));
+        assert!(tex.contains("Lossless re-export works."));
+
+        let md = fs::read_to_string(&out_md_file).expect("read out.md");
+        assert!(md.contains("# CLI Convert-IR Roundtrip"));
+        assert!(md.contains("Lossless re-export works."));
+
+        let _ = fs::remove_dir_all(&base_dir);
     }
 
     #[test]
