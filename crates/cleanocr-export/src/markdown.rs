@@ -316,10 +316,10 @@ fn escape_html(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
+            '&' => out.push_str("\x26amp;"),
+            '<' => out.push_str("\x26lt;"),
+            '>' => out.push_str("\x26gt;"),
+            '"' => out.push_str("\x26quot;"),
             _ => out.push(ch),
         }
     }
@@ -599,3 +599,4 @@ mod tests {
         assert!(md.contains("1. **First item**"));
     }
 }
+
