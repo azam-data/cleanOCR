@@ -328,14 +328,8 @@ mod tests {
     #[cfg(not(feature = "chart-vlm"))]
     #[test]
     fn charts_pgfplots_fails_fast_without_chart_vlm_feature() {
-        let cli = Cli::try_parse_from([
-            "cleanocr",
-            "process",
-            "paper.pdf",
-            "--charts",
-            "pgfplots",
-        ])
-        .expect("parse process with pgfplots");
+        let cli = Cli::try_parse_from(["cleanocr", "process", "paper.pdf", "--charts", "pgfplots"])
+            .expect("parse process with pgfplots");
 
         match cli.command {
             Command::Process(args) => {
@@ -350,14 +344,8 @@ mod tests {
     #[cfg(feature = "chart-vlm")]
     #[test]
     fn charts_pgfplots_succeeds_with_chart_vlm_feature() {
-        let cli = Cli::try_parse_from([
-            "cleanocr",
-            "process",
-            "paper.pdf",
-            "--charts",
-            "pgfplots",
-        ])
-        .expect("parse process with pgfplots");
+        let cli = Cli::try_parse_from(["cleanocr", "process", "paper.pdf", "--charts", "pgfplots"])
+            .expect("parse process with pgfplots");
 
         match cli.command {
             Command::Process(args) => validate_process_args(&args).expect("valid with feature"),
