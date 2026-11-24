@@ -9,6 +9,7 @@ use cleanocr_ir::{
 use image::RgbImage;
 
 use crate::assets::crop_bbox_to_png;
+use crate::ocr_engine::OcrEngine;
 
 /// Vision/OCR accuracy profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -59,9 +60,8 @@ pub struct PageVisionOutput {
 /// Analyzes a single page into a reading-order-sorted `PageIr` and cropped figure assets.
 ///
 /// - For `DigitalNativeText` pages, structures embedded PDF text directly into semantic blocks.
-/// - For `ScannedRaster` and `HybridNativePlusOcr` pages, detects ink bands via horizontal
-///   projection profiles (and uses `oar-ocr` when local ONNX weights are configured), cropping
-///   unrecognized visual regions as figure assets and flagging low-confidence blocks.
+/// - For `ScannedRaster` and `HybridNativePlusOcr` pages, runs `oar-ocr` when `config.model_dir`
+///   is provided, or falls back to deterministic ink-band segmentation offline.
 pub fn analyze_page(
     input: &PageAnalysisInput<'_>,
     config: &VisionConfig,
@@ -80,11 +80,21 @@ pub fn analyze_page(
                 blocks = structure_native_text(input.page_index, text);
             }
             if blocks.is_empty() {
-                detect_raster_regions(input, &mut blocks, &mut figures)?;
+                if let Some(model_dir) = &config.model_dir {
+                    let engine = OcrEngine::from_model_dir(model_dir)?;
+                    blocks = engine.recognize_page(input.image, input.page_index)?;
+                } else {
+                    detect_raster_regions(input, &mut blocks, &mut figures)?;
+                }
             }
         }
         PageIngestMode::ScannedRaster => {
-            detect_raster_regions(input, &mut blocks, &mut figures)?;
+            if let Some(model_dir) = &config.model_dir {
+                let engine = OcrEngine::from_model_dir(model_dir)?;
+                blocks = engine.recognize_page(input.image, input.page_index)?;
+            } else {
+                detect_raster_regions(input, &mut blocks, &mut figures)?;
+            }
         }
     }
 
