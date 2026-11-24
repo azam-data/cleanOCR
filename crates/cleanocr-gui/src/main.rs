@@ -385,7 +385,10 @@ fn run_file_pipeline(
         ctx.request_repaint();
     };
 
-    send_progress(0.10, format!("Ingesting {} at {} DPI...", input.display(), dpi));
+    send_progress(
+        0.10,
+        format!("Ingesting {} at {} DPI...", input.display(), dpi),
+    );
     let ingest_cfg = IngestConfig {
         dpi,
         ..IngestConfig::default()
@@ -434,14 +437,10 @@ fn run_file_pipeline(
             .map(|b| b.bbox)
             .collect();
 
-        let (mrc, fallback_raster_jpeg) = build_mrc(&page.image, &figure_boxes, mrc_profile)?;
-
-        page_assets.push(PageVisualAssets {
-            page_index: page.page_index,
-            mrc,
-            fallback_raster_jpeg,
-            figures: vision_out.figures,
-        });
+        let mut assets =
+            build_page_assets(page.page_index, &page.image, &figure_boxes, mrc_profile)?;
+        assets.figures = vision_out.figures;
+        page_assets.push(assets);
         page_irs.push(vision_out.page_ir);
     }
 
@@ -546,13 +545,9 @@ fn run_scan_pipeline(
                 .map(|b| b.bbox)
                 .collect();
 
-            let (mrc, fallback_raster_jpeg) = build_mrc(&page.image, &figure_boxes, mrc_profile)?;
-            page_assets.push(PageVisualAssets {
-                page_index: idx,
-                mrc,
-                fallback_raster_jpeg,
-                figures: vision_out.figures,
-            });
+            let mut assets = build_page_assets(idx, &page.image, &figure_boxes, mrc_profile)?;
+            assets.figures = vision_out.figures;
+            page_assets.push(assets);
             page_irs.push(vision_out.page_ir);
         }
     }
@@ -574,34 +569,46 @@ fn run_scan_pipeline(
     export_all(&doc_ir, &page_assets, out_dir, "scan", formats)
 }
 
-fn build_mrc(
-    image: &image::DynamicImage,
+fn build_page_assets(
+    page_index: usize,
+    image: &image::RgbImage,
     figure_boxes: &[BBox],
     profile: MrcProfile,
-) -> Result<(Option<cleanocr_mrc::MrcDecomposition>, Option<Vec<u8>>), String> {
-    match profile {
+) -> Result<PageVisualAssets, String> {
+    let (mrc, fallback_raster_jpeg) = match profile {
         MrcProfile::None => {
-            let full_jpg =
-                crop_bbox_to_jpeg(image, BBox::new(0.0, 0.0, 1.0, 1.0), 85).map_err(|e| e.to_string())?;
-            Ok((None, Some(full_jpg)))
+            let full_jpg = crop_bbox_to_jpeg(image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)
+                .map_err(|e| e.to_string())?;
+            (None, Some(full_jpg))
         }
         MrcProfile::Lossless => {
             let mrc_cfg = MrcConfig {
                 profile: MrcCompressionProfile::Lossless,
                 ..MrcConfig::default()
             };
-            let mrc = decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?;
-            Ok((Some(mrc), None))
+            (
+                Some(decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?),
+                None,
+            )
         }
         MrcProfile::BookMax => {
             let mrc_cfg = MrcConfig {
                 profile: MrcCompressionProfile::BookMax,
                 ..MrcConfig::default()
             };
-            let mrc = decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?;
-            Ok((Some(mrc), None))
+            (
+                Some(decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?),
+                None,
+            )
         }
-    }
+    };
+
+    Ok(PageVisualAssets {
+        page_index,
+        mrc,
+        fallback_raster_jpeg,
+        figures: Vec::new(),
+    })
 }
 
 fn export_all(
@@ -641,7 +648,8 @@ fn export_all(
             .map_err(|e| e.to_string())?;
         fs::read_to_string(&md_path).map_err(|e| e.to_string())?
     } else {
-        let tmp_md = std::env::temp_dir().join(format!("cleanocr_preview_{}.md", std::process::id()));
+        let tmp_md =
+            std::env::temp_dir().join(format!("cleanocr_preview_{}.md", std::process::id()));
         MarkdownExporter
             .export(doc_ir, page_assets, &tmp_md)
             .map_err(|e| e.to_string())?;
@@ -669,7 +677,11 @@ impl eframe::App for CleanOcrApp {
                 ui.selectable_value(&mut self.active_tab, ActiveTab::Scanner, "eSCL Scanner");
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let theme_label = if self.dark_mode { "Light Mode" } else { "Dark Mode" };
+                    let theme_label = if self.dark_mode {
+                        "Light Mode"
+                    } else {
+                        "Dark Mode"
+                    };
                     if ui.button(theme_label).clicked() {
                         self.dark_mode = !self.dark_mode;
                         ctx.set_visuals(if self.dark_mode {
