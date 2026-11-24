@@ -258,8 +258,7 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
 
         let (mrc, fallback_raster_jpeg) = match args.mrc {
             MrcProfile::None => {
-                let full_jpg =
-                    crop_bbox_to_jpeg(&page.image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)?;
+                let full_jpg = crop_bbox_to_jpeg(&page.image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)?;
                 (None, Some(full_jpg))
             }
             MrcProfile::Lossless => {
@@ -267,14 +266,20 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
                     profile: MrcCompressionProfile::Lossless,
                     ..MrcConfig::default()
                 };
-                (Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?), None)
+                (
+                    Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?),
+                    None,
+                )
             }
             MrcProfile::BookMax => {
                 let mrc_cfg = MrcConfig {
                     profile: MrcCompressionProfile::BookMax,
                     ..MrcConfig::default()
                 };
-                (Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?), None)
+                (
+                    Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?),
+                    None,
+                )
             }
         };
 
@@ -470,10 +475,8 @@ mod tests {
 
     #[test]
     fn process_command_runs_end_to_end_across_all_five_exporters() {
-        let base_dir = std::env::temp_dir().join(format!(
-            "cleanocr_e2e_process_{}",
-            std::process::id()
-        ));
+        let base_dir =
+            std::env::temp_dir().join(format!("cleanocr_e2e_process_{}", std::process::id()));
         let _ = fs::remove_dir_all(&base_dir);
         fs::create_dir_all(&base_dir).expect("create temp dir");
 

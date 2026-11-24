@@ -4,7 +4,9 @@ pub mod assets;
 pub mod pipeline;
 
 pub use assets::{crop_bbox_to_jpeg, crop_bbox_to_png, vectorize_overlay_svg};
-pub use pipeline::{PageAnalysisInput, PageVisionOutput, VisionConfig, VisionProfile, analyze_page};
+pub use pipeline::{
+    PageAnalysisInput, PageVisionOutput, VisionConfig, VisionProfile, analyze_page,
+};
 
 #[cfg(test)]
 mod tests {
@@ -27,8 +29,14 @@ mod tests {
 
         let out = analyze_page(&input, &VisionConfig::default()).expect("analyze native page");
         assert_eq!(out.page_ir.blocks.len(), 2);
-        assert!(matches!(out.page_ir.blocks[0].kind, BlockKind::Heading { level: 1, .. }));
-        assert!(matches!(out.page_ir.blocks[1].kind, BlockKind::Paragraph { .. }));
+        assert!(matches!(
+            out.page_ir.blocks[0].kind,
+            BlockKind::Heading { level: 1, .. }
+        ));
+        assert!(matches!(
+            out.page_ir.blocks[1].kind,
+            BlockKind::Paragraph { .. }
+        ));
         assert!(out.page_ir.low_confidence_flags.is_empty());
     }
 

@@ -9,8 +9,14 @@ use image::{ColorType, ImageFormat, RgbImage};
 /// Crops a normalized `[0.0, 1.0]` bounding box from `img` and encodes it as PNG bytes.
 pub fn crop_bbox_to_png(img: &RgbImage, bbox: BBox) -> Result<Vec<u8>> {
     let (x0, y0, x1, y1) = bbox.to_pixels(img.width(), img.height());
-    let w = x1.saturating_sub(x0).max(1).min(img.width().saturating_sub(x0));
-    let h = y1.saturating_sub(y0).max(1).min(img.height().saturating_sub(y0));
+    let w = x1
+        .saturating_sub(x0)
+        .max(1)
+        .min(img.width().saturating_sub(x0));
+    let h = y1
+        .saturating_sub(y0)
+        .max(1)
+        .min(img.height().saturating_sub(y0));
 
     let cropped = crop_imm(img, x0, y0, w, h).to_image();
     let mut buf = Cursor::new(Vec::new());
@@ -23,8 +29,14 @@ pub fn crop_bbox_to_png(img: &RgbImage, bbox: BBox) -> Result<Vec<u8>> {
 /// Crops a normalized `[0.0, 1.0]` bounding box from `img` and encodes it as RGB JPEG bytes.
 pub fn crop_bbox_to_jpeg(img: &RgbImage, bbox: BBox, quality: u8) -> Result<Vec<u8>> {
     let (x0, y0, x1, y1) = bbox.to_pixels(img.width(), img.height());
-    let w = x1.saturating_sub(x0).max(1).min(img.width().saturating_sub(x0));
-    let h = y1.saturating_sub(y0).max(1).min(img.height().saturating_sub(y0));
+    let w = x1
+        .saturating_sub(x0)
+        .max(1)
+        .min(img.width().saturating_sub(x0));
+    let h = y1
+        .saturating_sub(y0)
+        .max(1)
+        .min(img.height().saturating_sub(y0));
 
     let cropped = crop_imm(img, x0, y0, w, h).to_image();
     let mut buf = Cursor::new(Vec::new());
@@ -44,8 +56,14 @@ pub fn crop_bbox_to_jpeg(img: &RgbImage, bbox: BBox, quality: u8) -> Result<Vec<
 /// using `vtracer`.
 pub fn vectorize_overlay_svg(img: &RgbImage, bbox: BBox) -> Result<String> {
     let (x0, y0, x1, y1) = bbox.to_pixels(img.width(), img.height());
-    let w = x1.saturating_sub(x0).max(1).min(img.width().saturating_sub(x0));
-    let h = y1.saturating_sub(y0).max(1).min(img.height().saturating_sub(y0));
+    let w = x1
+        .saturating_sub(x0)
+        .max(1)
+        .min(img.width().saturating_sub(x0));
+    let h = y1
+        .saturating_sub(y0)
+        .max(1)
+        .min(img.height().saturating_sub(y0));
 
     let cropped = crop_imm(img, x0, y0, w, h).to_image();
     let mut rgba = Vec::with_capacity((w * h * 4) as usize);

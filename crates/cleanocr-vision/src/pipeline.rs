@@ -62,7 +62,10 @@ pub struct PageVisionOutput {
 /// - For `ScannedRaster` and `HybridNativePlusOcr` pages, detects ink bands via horizontal
 ///   projection profiles (and uses `oar-ocr` when local ONNX weights are configured), cropping
 ///   unrecognized visual regions as figure assets and flagging low-confidence blocks.
-pub fn analyze_page(input: &PageAnalysisInput<'_>, config: &VisionConfig) -> Result<PageVisionOutput> {
+pub fn analyze_page(
+    input: &PageAnalysisInput<'_>,
+    config: &VisionConfig,
+) -> Result<PageVisionOutput> {
     let mut blocks = Vec::new();
     let mut figures = BTreeMap::new();
 
@@ -226,12 +229,7 @@ fn detect_raster_regions(
     }
 
     for (idx, (y0, y1)) in bands.into_iter().enumerate() {
-        let bbox = BBox::new(
-            0.05,
-            y0 as f32 / h as f32,
-            0.95,
-            y1 as f32 / h as f32,
-        );
+        let bbox = BBox::new(0.05, y0 as f32 / h as f32, 0.95, y1 as f32 / h as f32);
         let asset_id = format!("p{}_region_{idx:02}", input.page_index);
         let png_bytes = crop_bbox_to_png(input.image, bbox)?;
         figures.insert(asset_id.clone(), png_bytes);
