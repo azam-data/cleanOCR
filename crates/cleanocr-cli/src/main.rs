@@ -75,6 +75,10 @@ struct ProcessArgs {
     /// Target raster processing resolution in DPI (72..=1200).
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u32).range(72..=1200))]
     dpi: u32,
+
+    /// Optional directory containing local ONNX OCR weights (det.onnx, rec.onnx, dict.txt).
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -227,6 +231,7 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
             AccuracyProfile::Standard => VisionProfile::Standard,
             AccuracyProfile::High => VisionProfile::High,
         },
+        model_dir: args.model_dir.clone(),
         ..VisionConfig::default()
     };
 
@@ -498,6 +503,7 @@ mod tests {
             accuracy: AccuracyProfile::Standard,
             charts: ChartMode::Raster,
             dpi: 72,
+            model_dir: None,
         })
         .expect("end-to-end process succeeds");
 
@@ -531,6 +537,8 @@ mod tests {
             "raster",
             "--dpi",
             "300",
+            "--model-dir",
+            "./models",
         ])
         .expect("parse process command");
 
@@ -552,6 +560,7 @@ mod tests {
                 assert_eq!(args.accuracy, AccuracyProfile::High);
                 assert_eq!(args.charts, ChartMode::Raster);
                 assert_eq!(args.dpi, 300);
+                assert_eq!(args.model_dir, Some(PathBuf::from("./models")));
                 validate_process_args(&args).expect("valid args");
             }
             other => panic!("expected Process command, got {other:?}"),
