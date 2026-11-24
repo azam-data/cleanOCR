@@ -33,10 +33,7 @@ pub fn classify_pdf_pages(pdf_bytes: &[u8]) -> Result<Vec<PdfPageClassification>
             .to_string();
 
         let image_xobject_count = count_image_xobjects(&doc, page_id);
-        let char_count = native_text
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .count();
+        let char_count = native_text.chars().filter(|c| !c.is_whitespace()).count();
 
         let mode = if char_count >= 25 && image_xobject_count == 0 {
             PageIngestMode::DigitalNativeText

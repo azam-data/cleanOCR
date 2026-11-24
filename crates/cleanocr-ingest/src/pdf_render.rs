@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, anyhow};
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
-use hayro::{RenderCache, RenderSettings, render};
+use hayro::{PixmapSettings, RenderCache, RenderSettings, render};
 use image::RgbImage;
 
 /// Renders all pages of a PDF byte buffer into `RgbImage`s at the requested `dpi` (e.g. 300)
@@ -14,17 +14,24 @@ pub fn render_pdf_pages(pdf_bytes: Vec<u8>, dpi: u32) -> Result<Vec<RgbImage>> {
 
     let scale = (dpi.max(72) as f32) / 72.0;
     let interpreter_settings = InterpreterSettings::default();
-    let render_settings = RenderSettings {
+    let render_settings = RenderSettings::default();
+    let pixmap_settings = PixmapSettings {
         x_scale: scale,
         y_scale: scale,
-        ..RenderSettings::default()
+        ..PixmapSettings::default()
     };
 
     let cache = RenderCache::new();
     let mut images = Vec::with_capacity(pdf.pages().len());
 
     for page in pdf.pages().iter() {
-        let pixmap = render(page, &cache, &interpreter_settings, &render_settings);
+        let pixmap = render(
+            page,
+            &cache,
+            &interpreter_settings,
+            &render_settings,
+            &pixmap_settings,
+        );
         let w = pixmap.width() as u32;
         let h = pixmap.height() as u32;
         let rgba = pixmap.data_as_u8_slice();

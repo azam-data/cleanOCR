@@ -216,7 +216,9 @@ mod tests {
         push_obj(&mut pdf, &mut offsets, stream_obj.as_bytes());
 
         let xref_pos = pdf.len();
-        pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes());
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
         for off in &offsets {
             pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
         }
@@ -256,7 +258,8 @@ mod tests {
     fn ingests_png_raster_as_scanned_page() {
         let img = RgbImage::from_pixel(120, 160, Rgb([245, 245, 245]));
         let mut buf = Cursor::new(Vec::new());
-        img.write_to(&mut buf, ImageFormat::Png).expect("encode png");
+        img.write_to(&mut buf, ImageFormat::Png)
+            .expect("encode png");
 
         let doc = ingest_bytes(
             buf.get_ref(),
