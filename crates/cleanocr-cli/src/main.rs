@@ -1,12 +1,18 @@
+use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cleanocr_export::{
-    DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PdfExporter,
-    extract_ir_from_file,
+    DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PageVisualAssets,
+    PdfExporter, extract_ir_from_file,
 };
-use cleanocr_ir::IR_SCHEMA_VERSION;
+use cleanocr_ingest::{IngestConfig, ingest_document};
+use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
+use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
+use cleanocr_vision::{
+    PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -196,6 +202,147 @@ fn validate_scan_args(args: &ScanArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_process(args: &ProcessArgs) -> Result<()> {
+    validate_process_args(args)?;
+
+    tracing::info!(
+        input = %args.input.display(),
+        out_dir = %args.out_dir.display(),
+        formats = ?args.formats,
+        mrc = ?args.mrc,
+        accuracy = ?args.accuracy,
+        dpi = args.dpi,
+        "Starting cleanOCR processing pipeline"
+    );
+
+    // 1. Ingest document (smart PDF router + hayro render + deskew/illumination).
+    let ingest_cfg = IngestConfig {
+        dpi: args.dpi,
+        ..IngestConfig::default()
+    };
+    let ingested = ingest_document(&args.input, &ingest_cfg)?;
+
+    let vision_cfg = VisionConfig {
+        profile: match args.accuracy {
+            AccuracyProfile::Standard => VisionProfile::Standard,
+            AccuracyProfile::High => VisionProfile::High,
+        },
+        ..VisionConfig::default()
+    };
+
+    let mut page_irs = Vec::with_capacity(ingested.pages.len());
+    let mut page_assets = Vec::with_capacity(ingested.pages.len());
+
+    // 2. Vision layout/OCR analysis + 3-layer MRC compression per page.
+    for page in &ingested.pages {
+        let vision_out = analyze_page(
+            &PageAnalysisInput {
+                page_index: page.page_index,
+                width_pt: page.width_pt,
+                height_pt: page.height_pt,
+                dpi: page.dpi,
+                ingest_mode: page.ingest_mode,
+                image: &page.image,
+                native_text: page.native_text.as_deref(),
+            },
+            &vision_cfg,
+        )?;
+
+        let figure_boxes: Vec<BBox> = vision_out
+            .page_ir
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::Figure { .. }))
+            .map(|b| b.bbox)
+            .collect();
+
+        let (mrc, fallback_raster_jpeg) = match args.mrc {
+            MrcProfile::None => {
+                let full_jpg =
+                    crop_bbox_to_jpeg(&page.image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)?;
+                (None, Some(full_jpg))
+            }
+            MrcProfile::Lossless => {
+                let mrc_cfg = MrcConfig {
+                    profile: MrcCompressionProfile::Lossless,
+                    ..MrcConfig::default()
+                };
+                (Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?), None)
+            }
+            MrcProfile::BookMax => {
+                let mrc_cfg = MrcConfig {
+                    profile: MrcCompressionProfile::BookMax,
+                    ..MrcConfig::default()
+                };
+                (Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?), None)
+            }
+        };
+
+        page_assets.push(PageVisualAssets {
+            page_index: page.page_index,
+            mrc,
+            fallback_raster_jpeg,
+            figures: vision_out.figures,
+        });
+        page_irs.push(vision_out.page_ir);
+    }
+
+    // 3. Assemble canonical DocumentIr.
+    let stem = args
+        .input
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("document");
+
+    let doc_ir = DocumentIr {
+        schema_version: IR_SCHEMA_VERSION.to_string(),
+        metadata: DocumentMetadata {
+            title: Some(stem.to_string()),
+            source_sha256: ingested.source_sha256,
+            source_filename: ingested.source_filename,
+            detected_languages: vec!["en".to_string()],
+            created_utc: "2026-11-24T00:00:00Z".to_string(),
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        pages: page_irs,
+    };
+
+    // 4. Fan out to requested deterministic exporters.
+    fs::create_dir_all(&args.out_dir)?;
+    for &fmt in &args.formats {
+        match fmt {
+            OutputFormat::Pdf => {
+                let out_path = args.out_dir.join(format!("{stem}.pdf"));
+                PdfExporter.export(&doc_ir, &page_assets, &out_path)?;
+            }
+            OutputFormat::Html => {
+                let out_path = args.out_dir.join(format!("{stem}.html"));
+                HtmlExporter.export(&doc_ir, &page_assets, &out_path)?;
+            }
+            OutputFormat::Tex => {
+                let out_path = args.out_dir.join(format!("{stem}_tex"));
+                LatexExporter.export(&doc_ir, &page_assets, &out_path)?;
+            }
+            OutputFormat::Md => {
+                let out_path = args.out_dir.join(format!("{stem}.md"));
+                MarkdownExporter.export(&doc_ir, &page_assets, &out_path)?;
+            }
+            OutputFormat::Docx => {
+                let out_path = args.out_dir.join(format!("{stem}.docx"));
+                DocxExporter.export(&doc_ir, &page_assets, &out_path)?;
+            }
+        }
+    }
+
+    tracing::info!(
+        pages = doc_ir.pages.len(),
+        out_dir = %args.out_dir.display(),
+        "cleanOCR processing completed"
+    );
+    Ok(())
+}
+
 fn run_convert_ir(args: &ConvertIrArgs) -> Result<()> {
     let ir = extract_ir_from_file(&args.input)?;
     let empty_assets = Vec::new();
@@ -229,23 +376,7 @@ fn run_doctor() {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Process(args) => {
-            validate_process_args(&args)?;
-            tracing::info!(
-                input = %args.input.display(),
-                out_dir = %args.out_dir.display(),
-                formats = ?args.formats,
-                mrc = ?args.mrc,
-                accuracy = ?args.accuracy,
-                charts = ?args.charts,
-                dpi = args.dpi,
-                "Validated process arguments"
-            );
-            bail!(
-                "End-to-end `process` pipeline is not yet wired \
-                 (scheduled for Milestones 3-5)."
-            );
-        }
+        Command::Process(args) => run_process(&args),
         Command::ConvertIr(args) => run_convert_ir(&args),
         Command::Doctor => {
             run_doctor();
@@ -274,14 +405,110 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use cleanocr_ir::{
         BBox, Block, BlockKind, DocumentIr, DocumentMetadata, PageIngestMode, PageIr, TextLine,
         TextSource, TextSpan,
     };
 
     use super::*;
+
+    fn make_minimal_digital_pdf() -> Vec<u8> {
+        let content = b"BT /F1 18 Tf 50 750 Td (Hello cleanOCR end-to-end pipeline!) Tj ET";
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+
+        let mut offsets = Vec::new();
+        let push_obj = |buf: &mut Vec<u8>, offs: &mut Vec<usize>, body: &[u8]| {
+            offs.push(buf.len());
+            buf.extend_from_slice(body);
+        };
+
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>\nendobj\n",
+        );
+        push_obj(
+            &mut pdf,
+            &mut offsets,
+            b"4 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        );
+
+        let stream_obj = format!(
+            "5 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+            content.len(),
+            std::str::from_utf8(content).unwrap()
+        );
+        push_obj(&mut pdf, &mut offsets, stream_obj.as_bytes());
+
+        let xref_pos = pdf.len();
+        pdf.extend_from_slice(
+            format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len() + 1).as_bytes(),
+        );
+        for off in &offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n \n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_pos}\n%%EOF\n",
+                offsets.len() + 1
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    #[test]
+    fn process_command_runs_end_to_end_across_all_five_exporters() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "cleanocr_e2e_process_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&base_dir);
+        fs::create_dir_all(&base_dir).expect("create temp dir");
+
+        let input_pdf = base_dir.join("sample.pdf");
+        let out_dir = base_dir.join("out");
+        fs::write(&input_pdf, make_minimal_digital_pdf()).expect("write input PDF");
+
+        run_process(&ProcessArgs {
+            input: input_pdf,
+            out_dir: out_dir.clone(),
+            formats: vec![
+                OutputFormat::Pdf,
+                OutputFormat::Html,
+                OutputFormat::Tex,
+                OutputFormat::Md,
+                OutputFormat::Docx,
+            ],
+            mrc: MrcProfile::Lossless,
+            accuracy: AccuracyProfile::Standard,
+            charts: ChartMode::Raster,
+            dpi: 72,
+        })
+        .expect("end-to-end process succeeds");
+
+        assert!(out_dir.join("sample.pdf").exists());
+        assert!(out_dir.join("sample.html").exists());
+        assert!(out_dir.join("sample_tex/main.tex").exists());
+        assert!(out_dir.join("sample.md").exists());
+        assert!(out_dir.join("sample.docx").exists());
+
+        let md = fs::read_to_string(out_dir.join("sample.md")).expect("read md");
+        assert!(md.contains("Hello cleanOCR end-to-end pipeline!"));
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
 
     #[test]
     fn parses_process_command_with_defaults_and_flags() {
@@ -451,7 +678,6 @@ mod tests {
 
         let base_dir =
             std::env::temp_dir().join(format!("cleanocr_cli_convert_ir_{}", std::process::id()));
-
         let _ = fs::remove_dir_all(&base_dir);
         fs::create_dir_all(&base_dir).expect("create temp dir");
 
