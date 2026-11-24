@@ -10,7 +10,7 @@ use cleanocr_ir::BBox;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::{FilterType, resize};
 use image::{ColorType, RgbImage};
-use jbig2enc_rust::{Jbig2Config, encode_single_image_lossless, encode_single_image_with_config};
+use jbig2enc_rust::{encode_single_image, encode_single_image_lossless};
 
 pub use binarize::{BinarizeConfig, build_photo_mask, extract_ink_mask, pack_mask_msb_first};
 pub use inpaint::pull_push_inpaint;
@@ -142,13 +142,12 @@ fn encode_mask_jbig2(
     let pixels: Vec<u8> = ink_mask.iter().map(|&b| u8::from(b)).collect();
 
     let encoded = match profile {
-        MrcCompressionProfile::Lossless => encode_single_image_lossless(&pixels, width, height, true)
-            .context("lossless JBIG2 mask encoding failed")?,
-        MrcCompressionProfile::BookMax => {
-            let cfg = Jbig2Config::text();
-            encode_single_image_with_config(&pixels, width, height, true, &cfg)
-                .context("book-max JBIG2 mask encoding failed")?
+        MrcCompressionProfile::Lossless => {
+            encode_single_image_lossless(&pixels, width, height, true)
+                .context("lossless JBIG2 mask encoding failed")?
         }
+        MrcCompressionProfile::BookMax => encode_single_image(&pixels, width, height, true)
+            .context("book-max JBIG2 mask encoding failed")?,
     };
 
     Ok(encoded.page_data)
@@ -175,7 +174,12 @@ fn encode_rgb_jpeg(img: &RgbImage, quality: u8) -> Result<Vec<u8>> {
     let mut buf = Cursor::new(Vec::new());
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, quality);
     encoder
-        .encode(img.as_raw(), img.width(), img.height(), ColorType::Rgb8.into())
+        .encode(
+            img.as_raw(),
+            img.width(),
+            img.height(),
+            ColorType::Rgb8.into(),
+        )
         .context("failed to encode RGB JPEG layer")?;
     Ok(buf.into_inner())
 }

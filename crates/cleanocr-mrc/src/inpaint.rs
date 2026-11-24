@@ -23,7 +23,11 @@ pub fn pull_push_inpaint(img: &RgbImage, known: &[bool]) -> RgbImage {
     for i in 0..(w * h) {
         if known[i] {
             any_known = true;
-            base_rgb[i] = [raw[i * 3] as f32, raw[i * 3 + 1] as f32, raw[i * 3 + 2] as f32];
+            base_rgb[i] = [
+                raw[i * 3] as f32,
+                raw[i * 3 + 1] as f32,
+                raw[i * 3 + 2] as f32,
+            ];
             base_w[i] = 1.0;
         }
     }

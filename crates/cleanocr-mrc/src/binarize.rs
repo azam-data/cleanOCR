@@ -95,7 +95,9 @@ pub fn extract_ink_mask(
         let r = raw[i * 3] as f32;
         let g = raw[i * 3 + 1] as f32;
         let b = raw[i * 3 + 2] as f32;
-        let y = (0.299 * r + 0.587 * g + 0.114 * b).round().clamp(0.0, 255.0) as u8;
+        let y = (0.299 * r + 0.587 * g + 0.114 * b)
+            .round()
+            .clamp(0.0, 255.0) as u8;
         luma[i] = y;
         if y >= 200 && !photo_mask[i] {
             sum_r += raw[i * 3] as u64;
@@ -304,6 +306,9 @@ mod tests {
             false, true, false, false, false, false, false, false, false, // row 1 (9 px)
         ];
         let packed = pack_mask_msb_first(&mask, 9, 2);
-        assert_eq!(packed, vec![0b1000_0001, 0b1000_0000, 0b0100_0000, 0b0000_0000]);
+        assert_eq!(
+            packed,
+            vec![0b1000_0001, 0b1000_0000, 0b0100_0000, 0b0000_0000]
+        );
     }
 }
