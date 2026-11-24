@@ -412,7 +412,11 @@ fn run_file_pipeline(
         let frac = 0.15 + 0.65 * (idx as f32 / total_pages as f32);
         send_progress(
             frac,
-            format!("Analyzing & compressing page {}/{}...", idx + 1, total_pages),
+            format!(
+                "Analyzing & compressing page {}/{}...",
+                idx + 1,
+                total_pages
+            ),
         );
 
         let vision_out = analyze_page(
@@ -607,7 +611,7 @@ fn build_page_assets(
         page_index,
         mrc,
         fallback_raster_jpeg,
-        figures: Vec::new(),
+        figures: Default::default(),
     })
 }
 
@@ -838,7 +842,10 @@ impl CleanOcrApp {
         } else {
             ui.label("Drop a PDF or image anywhere in this window, or click 'Select File...'.");
         }
-        ui.small(format!("Output dir: {}", self.resolve_output_dir().display()));
+        ui.small(format!(
+            "Output dir: {}",
+            self.resolve_output_dir().display()
+        ));
 
         ui.separator();
         ui.heading("Extracted Text / Markdown Preview");
