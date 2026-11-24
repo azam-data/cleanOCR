@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -10,6 +11,7 @@ use cleanocr_export::{
 use cleanocr_ingest::{IngestConfig, ingest_document};
 use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
 use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
+use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
     PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
 };
@@ -375,6 +377,137 @@ fn run_convert_ir(args: &ConvertIrArgs) -> Result<()> {
     Ok(())
 }
 
+fn run_scan(args: &ScanArgs) -> Result<()> {
+    validate_scan_args(args)?;
+
+    if args.discover {
+        let scanners = discover_scanners(Duration::from_secs(3))?;
+        if scanners.is_empty() {
+            println!("No eSCL (AirScan / Mopria) scanners found on the local network.");
+        } else {
+            println!("Discovered eSCL scanners:");
+            for s in scanners {
+                println!("  - {} ({})", s.name, s.base_url);
+            }
+        }
+        return Ok(());
+    }
+
+    let target = args
+        .device
+        .as_deref()
+        .expect("validate_scan_args ensures --device is present");
+
+    let base_url = if target.starts_with("http://") || target.starts_with("https://") {
+        target.to_string()
+    } else {
+        let scanners = discover_scanners(Duration::from_secs(3))?;
+        scanners
+            .into_iter()
+            .find(|s| s.name.eq_ignore_ascii_case(target) || s.name.contains(target))
+            .map(|s| s.base_url)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "scanner '{target}' not found via mDNS; run `cleanocr scan --discover` or pass an eSCL URL"
+                )
+            })?
+    };
+
+    let job = ScanJobRequest {
+        source: match args.source {
+            ScanSource::Platen => ScanInputSource::Platen,
+            ScanSource::Adf => ScanInputSource::Adf,
+        },
+        ..ScanJobRequest::default()
+    };
+
+    tracing::info!(base_url = %base_url, source = ?args.source, "Starting eSCL scan job");
+    let scanned_docs = scan_and_ingest(&base_url, &job, &IngestConfig::default())?;
+    if scanned_docs.is_empty() {
+        bail!("scanner returned 0 pages");
+    }
+
+    let vision_cfg = VisionConfig::default();
+    let mrc_cfg = MrcConfig::default();
+    let mut page_irs = Vec::with_capacity(scanned_docs.len());
+    let mut page_assets = Vec::with_capacity(scanned_docs.len());
+
+    for (idx, doc) in scanned_docs.iter().enumerate() {
+        for page in &doc.pages {
+            let vision_out = analyze_page(
+                &PageAnalysisInput {
+                    page_index: idx,
+                    width_pt: page.width_pt,
+                    height_pt: page.height_pt,
+                    dpi: page.dpi,
+                    ingest_mode: page.ingest_mode,
+                    image: &page.image,
+                    native_text: page.native_text.as_deref(),
+                },
+                &vision_cfg,
+            )?;
+
+            let figure_boxes: Vec<BBox> = vision_out
+                .page_ir
+                .blocks
+                .iter()
+                .filter(|b| matches!(b.kind, BlockKind::Figure { .. }))
+                .map(|b| b.bbox)
+                .collect();
+
+            let mrc = decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?;
+            page_assets.push(PageVisualAssets {
+                page_index: idx,
+                mrc: Some(mrc),
+                fallback_raster_jpeg: None,
+                figures: vision_out.figures,
+            });
+            page_irs.push(vision_out.page_ir);
+        }
+    }
+
+    let doc_ir = DocumentIr {
+        schema_version: IR_SCHEMA_VERSION.to_string(),
+        metadata: DocumentMetadata {
+            title: Some("Scanned Document".to_string()),
+            source_sha256: scanned_docs[0].source_sha256.clone(),
+            source_filename: Some("scan.jpg".to_string()),
+            detected_languages: vec!["en".to_string()],
+            created_utc: "2026-11-24T00:00:00Z".to_string(),
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        pages: page_irs,
+    };
+
+    fs::create_dir_all(&args.out_dir)?;
+    for &fmt in &args.formats {
+        match fmt {
+            OutputFormat::Pdf => {
+                PdfExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan.pdf"))?
+            }
+            OutputFormat::Html => {
+                HtmlExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan.html"))?
+            }
+            OutputFormat::Tex => {
+                LatexExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan_tex"))?
+            }
+            OutputFormat::Md => {
+                MarkdownExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan.md"))?
+            }
+            OutputFormat::Docx => {
+                DocxExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan.docx"))?
+            }
+        }
+    }
+
+    tracing::info!(
+        pages = doc_ir.pages.len(),
+        out_dir = %args.out_dir.display(),
+        "eSCL scan and export completed"
+    );
+    Ok(())
+}
+
 fn run_doctor() {
     println!("cleanOCR Doctor");
     println!("  Engine version    : {}", env!("CARGO_PKG_VERSION"));
@@ -392,18 +525,7 @@ fn run(cli: Cli) -> Result<()> {
             run_doctor();
             Ok(())
         }
-        Command::Scan(args) => {
-            validate_scan_args(&args)?;
-            tracing::info!(
-                discover = args.discover,
-                device = ?args.device,
-                source = ?args.source,
-                formats = ?args.formats,
-                out_dir = %args.out_dir.display(),
-                "Validated scan arguments"
-            );
-            bail!("eSCL network scanner is not yet wired (scheduled for Milestone 6).");
-        }
+        Command::Scan(args) => run_scan(&args),
     }
 }
 
