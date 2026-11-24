@@ -16,6 +16,6 @@ thiserror.workspace = true
 tracing.workspace = true
 image.workspace = true
 tokio.workspace = true
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
 mdns-sd.workspace = true
 quick-xml.workspace = true
