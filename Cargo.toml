@@ -8,6 +8,7 @@ members = [
     "crates/cleanocr-export",
     "crates/cleanocr-scan",
     "crates/cleanocr-cli",
+    "crates/cleanocr-gui",
 ]
 
 [workspace.package]
