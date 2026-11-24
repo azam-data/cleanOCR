@@ -15,9 +15,10 @@ eframe = { version = "0.29", default-features = false, features = [
     "wayland",
     "x11",
 ] }
+image = "0.25"
 rfd = "0.15"
 
-# Workspace crates (ready for pipeline wiring)
+# Workspace crates
 cleanocr-ir = { path = "../cleanocr-ir" }
 cleanocr-ingest = { path = "../cleanocr-ingest" }
 cleanocr-vision = { path = "../cleanocr-vision" }
