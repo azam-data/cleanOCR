@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use cleanocr_ir::{BBox, Block, BlockKind, TextLine, TextSpan, TextSource};
+use cleanocr_ir::{BBox, Block, BlockKind, TextLine, TextSource, TextSpan};
 use image::RgbImage;
 use oar_ocr::oarocr::{OAROCR, OAROCRBuilder};
 
@@ -65,7 +65,12 @@ impl OcrModelPaths {
             "dict",
             "txt",
         )
-        .with_context(|| format!("missing character dictionary .txt file in {}", dir.display()))?;
+        .with_context(|| {
+            format!(
+                "missing character dictionary .txt file in {}",
+                dir.display()
+            )
+        })?;
 
         Ok(Self {
             det_model,
@@ -83,13 +88,9 @@ pub struct OcrEngine {
 impl OcrEngine {
     /// Loads ONNX detection + recognition models from `paths`.
     pub fn from_paths(paths: &OcrModelPaths) -> Result<Self> {
-        let inner = OAROCRBuilder::new(
-            &paths.det_model,
-            &paths.rec_model,
-            &paths.dict_path,
-        )
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to initialize oar-ocr pipeline: {e}"))?;
+        let inner = OAROCRBuilder::new(&paths.det_model, &paths.rec_model, &paths.dict_path)
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to initialize oar-ocr pipeline: {e}"))?;
 
         Ok(Self { inner })
     }
@@ -127,13 +128,11 @@ impl OcrEngine {
                 continue;
             }
 
-            let bbox = BBox::from_pixels(
-                region.bounding_box.x_min(),
-                region.bounding_box.y_min(),
-                region.bounding_box.x_max(),
-                region.bounding_box.y_max(),
-                w,
-                h,
+            let bbox = BBox::new(
+                (region.bounding_box.x_min() / w as f32).clamp(0.0, 1.0),
+                (region.bounding_box.y_min() / h as f32).clamp(0.0, 1.0),
+                (region.bounding_box.x_max() / w as f32).clamp(0.0, 1.0),
+                (region.bounding_box.y_max() / h as f32).clamp(0.0, 1.0),
             );
 
             let span = TextSpan {
@@ -207,10 +206,8 @@ mod tests {
 
     #[test]
     fn discovers_standard_and_ppocr_model_filenames_in_directory() {
-        let dir = std::env::temp_dir().join(format!(
-            "cleanocr_model_discovery_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("cleanocr_model_discovery_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create temp model dir");
 
