@@ -6,14 +6,15 @@ use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use cleanocr_export::{
     DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PageVisualAssets,
-    PdfExporter, extract_ir_from_file,
+    PdfExporter, XlsxExporter, extract_ir_from_file,
 };
-use cleanocr_ingest::{IngestConfig, ingest_document};
+use cleanocr_ingest::{IngestConfig, ingest_document_streaming};
 use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
-use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
+use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc, should_bypass_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
-    PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    discover_default_models_dir,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -132,6 +133,7 @@ enum OutputFormat {
     Tex,
     Md,
     Docx,
+    Xlsx,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -221,27 +223,36 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
         "Starting cleanOCR processing pipeline"
     );
 
-    // 1. Ingest document (smart PDF router + hayro render + deskew/illumination).
+    // 1. Lazily stream document pages (smart PDF router + hayro render + deskew/illumination).
     let ingest_cfg = IngestConfig {
         dpi: args.dpi,
         ..IngestConfig::default()
     };
-    let ingested = ingest_document(&args.input, &ingest_cfg)?;
+    let mut stream = ingest_document_streaming(&args.input, &ingest_cfg)?;
+    let source_sha256 = stream.source_sha256.clone();
+    let source_filename = stream.source_filename.clone();
 
     let vision_cfg = VisionConfig {
         profile: match args.accuracy {
             AccuracyProfile::Standard => VisionProfile::Standard,
             AccuracyProfile::High => VisionProfile::High,
         },
-        model_dir: args.model_dir.clone(),
+        model_dir: args.model_dir.clone().or_else(discover_default_models_dir),
         ..VisionConfig::default()
     };
 
-    let mut page_irs = Vec::with_capacity(ingested.pages.len());
-    let mut page_assets = Vec::with_capacity(ingested.pages.len());
+    let ocr_engine = vision_cfg
+        .model_dir
+        .as_deref()
+        .map(OcrEngine::from_model_dir)
+        .transpose()?;
 
-    // 2. Vision layout/OCR analysis + 3-layer MRC compression per page.
-    for page in &ingested.pages {
+    let mut page_irs = Vec::with_capacity(stream.total_pages);
+    let mut page_assets = Vec::with_capacity(stream.total_pages);
+
+    // 2. Vision layout/OCR analysis + 4-layer MRC compression page-by-page (drops RgbImage immediately).
+    for page_res in &mut stream {
+        let page = page_res?;
         let vision_out = analyze_page(
             &PageAnalysisInput {
                 page_index: page.page_index,
@@ -253,6 +264,7 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
                 native_text: page.native_text.as_deref(),
             },
             &vision_cfg,
+            ocr_engine.as_ref(),
         )?;
 
         let figure_boxes: Vec<BBox> = vision_out
@@ -263,32 +275,30 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
             .map(|b| b.bbox)
             .collect();
 
-        let (mrc, fallback_raster_jpeg) = match args.mrc {
-            MrcProfile::None => {
+        let (mrc, fallback_raster_jpeg) =
+            if args.mrc == MrcProfile::None || should_bypass_mrc(&figure_boxes) {
                 let full_jpg = crop_bbox_to_jpeg(&page.image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)?;
                 (None, Some(full_jpg))
-            }
-            MrcProfile::Lossless => {
+            } else {
+                let profile = match args.mrc {
+                    MrcProfile::Lossless => MrcCompressionProfile::Lossless,
+                    MrcProfile::BookMax => MrcCompressionProfile::BookMax,
+                    MrcProfile::None => unreachable!(),
+                };
                 let mrc_cfg = MrcConfig {
-                    profile: MrcCompressionProfile::Lossless,
+                    profile,
                     ..MrcConfig::default()
                 };
                 (
-                    Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?),
+                    Some(decompose_mrc(
+                        &page.image,
+                        &figure_boxes,
+                        vision_out.table_grid_mask.as_deref(),
+                        &mrc_cfg,
+                    )?),
                     None,
                 )
-            }
-            MrcProfile::BookMax => {
-                let mrc_cfg = MrcConfig {
-                    profile: MrcCompressionProfile::BookMax,
-                    ..MrcConfig::default()
-                };
-                (
-                    Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?),
-                    None,
-                )
-            }
-        };
+            };
 
         page_assets.push(PageVisualAssets {
             page_index: page.page_index,
@@ -297,6 +307,7 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
             figures: vision_out.figures,
         });
         page_irs.push(vision_out.page_ir);
+        drop(page);
     }
 
     // 3. Assemble canonical DocumentIr.
@@ -311,8 +322,8 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
         schema_version: IR_SCHEMA_VERSION.to_string(),
         metadata: DocumentMetadata {
             title: Some(stem.to_string()),
-            source_sha256: ingested.source_sha256,
-            source_filename: ingested.source_filename,
+            source_sha256,
+            source_filename,
             detected_languages: vec!["en".to_string()],
             created_utc: "2026-11-24T00:00:00Z".to_string(),
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -344,6 +355,10 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
                 let out_path = args.out_dir.join(format!("{stem}.docx"));
                 DocxExporter.export(&doc_ir, &page_assets, &out_path)?;
             }
+            OutputFormat::Xlsx => {
+                let out_path = args.out_dir.join(format!("{stem}.xlsx"));
+                XlsxExporter.export(&doc_ir, &page_assets, &out_path)?;
+            }
         }
     }
 
@@ -365,6 +380,7 @@ fn run_convert_ir(args: &ConvertIrArgs) -> Result<()> {
         OutputFormat::Tex => LatexExporter.export(&ir, &empty_assets, &args.out)?,
         OutputFormat::Md => MarkdownExporter.export(&ir, &empty_assets, &args.out)?,
         OutputFormat::Docx => DocxExporter.export(&ir, &empty_assets, &args.out)?,
+        OutputFormat::Xlsx => XlsxExporter.export(&ir, &empty_assets, &args.out)?,
     }
 
     tracing::info!(
@@ -445,6 +461,7 @@ fn run_scan(args: &ScanArgs) -> Result<()> {
                     native_text: page.native_text.as_deref(),
                 },
                 &vision_cfg,
+                None,
             )?;
 
             let figure_boxes: Vec<BBox> = vision_out
@@ -455,7 +472,12 @@ fn run_scan(args: &ScanArgs) -> Result<()> {
                 .map(|b| b.bbox)
                 .collect();
 
-            let mrc = decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?;
+            let mrc = decompose_mrc(
+                &page.image,
+                &figure_boxes,
+                vision_out.table_grid_mask.as_deref(),
+                &mrc_cfg,
+            )?;
             page_assets.push(PageVisualAssets {
                 page_index: idx,
                 mrc: Some(mrc),
@@ -496,6 +518,9 @@ fn run_scan(args: &ScanArgs) -> Result<()> {
             }
             OutputFormat::Docx => {
                 DocxExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan.docx"))?
+            }
+            OutputFormat::Xlsx => {
+                XlsxExporter.export(&doc_ir, &page_assets, &args.out_dir.join("scan.xlsx"))?
             }
         }
     }
@@ -856,5 +881,35 @@ mod tests {
     fn rejects_out_of_range_dpi() {
         let err = Cli::try_parse_from(["cleanocr", "process", "doc.png", "--dpi", "30"]);
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn process_command_exports_xlsx_via_xlsx_exporter() {
+        let base_dir =
+            std::env::temp_dir().join(format!("cleanocr_cli_xlsx_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_dir);
+        fs::create_dir_all(&base_dir).expect("create temp dir");
+
+        let input_pdf = base_dir.join("sample.pdf");
+        let out_dir = base_dir.join("out");
+        fs::write(&input_pdf, make_minimal_digital_pdf()).expect("write sample pdf");
+
+        let cli = Cli::try_parse_from([
+            "cleanocr",
+            "process",
+            input_pdf.to_str().unwrap(),
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+            "--formats",
+            "md,xlsx",
+        ])
+        .expect("parse process with md,xlsx");
+
+        run(cli).expect("run process with md,xlsx");
+        assert!(out_dir.join("sample.md").is_file());
+        let xlsx_bytes = fs::read(out_dir.join("sample.xlsx")).expect("read sample.xlsx");
+        assert!(xlsx_bytes.starts_with(b"PK"));
+
+        let _ = fs::remove_dir_all(&base_dir);
     }
 }

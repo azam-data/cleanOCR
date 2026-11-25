@@ -12,10 +12,11 @@ chart-vlm = []
 [dependencies]
 cleanocr-ir = { path = "../cleanocr-ir" }
 anyhow.workspace = true
-thiserror.workspace = true
 tracing.workspace = true
 rayon.workspace = true
 image.workspace = true
 vtracer.workspace = true
 oar-ocr.workspace = true
-ort.workspace = true
+
+[dev-dependencies]
+cleanocr-export = { path = "../cleanocr-export" }

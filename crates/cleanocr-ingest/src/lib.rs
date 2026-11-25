@@ -12,7 +12,7 @@ use cleanocr_ir::PageIngestMode;
 use image::RgbImage;
 use sha2::{Digest, Sha256};
 
-pub use pdf_render::render_pdf_pages;
+pub use pdf_render::{PdfPageStream, render_pdf_pages};
 pub use pdf_router::{PdfPageClassification, classify_pdf_pages};
 pub use preprocess::{
     PreprocessConfig, PreprocessedPage, estimate_skew_angle_deg, normalize_illumination,
@@ -58,6 +58,77 @@ pub struct IngestedDocument {
     pub pages: Vec<IngestedPage>,
 }
 
+enum StreamSource {
+    Pdf {
+        classifications: std::vec::IntoIter<PdfPageClassification>,
+        stream: PdfPageStream,
+    },
+    SingleRaster(Option<IngestedPage>),
+}
+
+/// Lazy page-by-page document ingestion stream so callers never hold all uncompressed
+/// page bitmaps in RAM simultaneously.
+pub struct StreamingIngestedDocument {
+    pub source_sha256: String,
+    pub source_filename: Option<String>,
+    pub total_pages: usize,
+    dpi: u32,
+    preprocess: PreprocessConfig,
+    source: StreamSource,
+}
+
+impl Iterator for StreamingIngestedDocument {
+    type Item = Result<IngestedPage>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match &mut self.source {
+            StreamSource::Pdf {
+                classifications,
+                stream,
+            } => {
+                let cls = classifications.next()?;
+                let raw_res = stream.next()?;
+                let raw_img = match raw_res {
+                    Ok(img) => img,
+                    Err(e) => return Some(Err(e)),
+                };
+
+                let (image, detected_skew_deg) = if cls.mode == PageIngestMode::ScannedRaster {
+                    let pre = preprocess_raster(&raw_img, &self.preprocess);
+                    (pre.image, pre.detected_skew_deg)
+                } else {
+                    (raw_img, 0.0)
+                };
+
+                let native_text = if cls.native_text.is_empty() {
+                    None
+                } else {
+                    Some(cls.native_text)
+                };
+
+                tracing::debug!(
+                    page = cls.page_index,
+                    mode = ?cls.mode,
+                    skew_deg = detected_skew_deg,
+                    "Streamed ingested PDF page"
+                );
+
+                Some(Ok(IngestedPage {
+                    page_index: cls.page_index,
+                    width_pt: cls.width_pt,
+                    height_pt: cls.height_pt,
+                    dpi: self.dpi,
+                    ingest_mode: cls.mode,
+                    image,
+                    native_text,
+                    detected_skew_deg,
+                }))
+            }
+            StreamSource::SingleRaster(slot) => slot.take().map(Ok),
+        }
+    }
+}
+
 /// Computes lowercase hex SHA-256 of raw input bytes.
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -68,9 +139,11 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// Ingests a PDF, PNG, JPEG, or TIFF file from disk, classifying PDF pages and running
-/// deskew + illumination normalization on scanned/raster inputs.
-pub fn ingest_document(path: &Path, config: &IngestConfig) -> Result<IngestedDocument> {
+/// Lazily ingests a PDF or raster image from disk, yielding one `IngestedPage` at a time.
+pub fn ingest_document_streaming(
+    path: &Path,
+    config: &IngestConfig,
+) -> Result<StreamingIngestedDocument> {
     let bytes = fs::read(path)
         .with_context(|| format!("failed to read input document {}", path.display()))?;
     let source_filename = path
@@ -78,72 +151,44 @@ pub fn ingest_document(path: &Path, config: &IngestConfig) -> Result<IngestedDoc
         .and_then(|n| n.to_str())
         .map(ToString::to_string);
 
-    ingest_bytes(&bytes, source_filename, config)
+    ingest_bytes_streaming(bytes, source_filename, config)
 }
 
-/// Ingests a PDF or raster image directly from an in-memory byte slice.
-pub fn ingest_bytes(
-    bytes: &[u8],
+/// Lazily ingests a PDF or raster image from an in-memory byte buffer.
+pub fn ingest_bytes_streaming(
+    bytes: Vec<u8>,
     source_filename: Option<String>,
     config: &IngestConfig,
-) -> Result<IngestedDocument> {
-    let source_sha256 = sha256_hex(bytes);
+) -> Result<StreamingIngestedDocument> {
+    let source_sha256 = sha256_hex(&bytes);
 
     if bytes.starts_with(b"%PDF-") {
-        let classifications = classify_pdf_pages(bytes)?;
-        let rendered_pages = render_pdf_pages(bytes.to_vec(), config.dpi)?;
+        let classifications = classify_pdf_pages(&bytes)?;
+        let stream = PdfPageStream::new(bytes, config.dpi)?;
 
-        if classifications.len() != rendered_pages.len() {
+        if classifications.len() != stream.len() {
             bail!(
                 "PDF page count mismatch: lopdf found {} pages, hayro rendered {} pages",
                 classifications.len(),
-                rendered_pages.len()
+                stream.len()
             );
         }
 
-        let mut pages = Vec::with_capacity(classifications.len());
-        for (cls, raw_img) in classifications.into_iter().zip(rendered_pages.into_iter()) {
-            let (image, detected_skew_deg) = if cls.mode == PageIngestMode::ScannedRaster {
-                let pre = preprocess_raster(&raw_img, &config.preprocess);
-                (pre.image, pre.detected_skew_deg)
-            } else {
-                (raw_img, 0.0)
-            };
-
-            let native_text = if cls.native_text.is_empty() {
-                None
-            } else {
-                Some(cls.native_text)
-            };
-
-            tracing::debug!(
-                page = cls.page_index,
-                mode = ?cls.mode,
-                skew_deg = detected_skew_deg,
-                "Ingested PDF page"
-            );
-
-            pages.push(IngestedPage {
-                page_index: cls.page_index,
-                width_pt: cls.width_pt,
-                height_pt: cls.height_pt,
-                dpi: config.dpi,
-                ingest_mode: cls.mode,
-                image,
-                native_text,
-                detected_skew_deg,
-            });
-        }
-
-        return Ok(IngestedDocument {
+        let total_pages = classifications.len();
+        return Ok(StreamingIngestedDocument {
             source_sha256,
             source_filename,
-            pages,
+            total_pages,
+            dpi: config.dpi,
+            preprocess: config.preprocess,
+            source: StreamSource::Pdf {
+                classifications: classifications.into_iter(),
+                stream,
+            },
         });
     }
 
-    // Otherwise decode as a raster image (PNG, JPEG, TIFF, WebP, etc.).
-    let dyn_img = image::load_from_memory(bytes)
+    let dyn_img = image::load_from_memory(&bytes)
         .context("failed to decode input as PDF or supported raster image")?;
     let rgb = dyn_img.to_rgb8();
     let pre = preprocess_raster(&rgb, &config.preprocess);
@@ -152,10 +197,13 @@ pub fn ingest_bytes(
     let width_pt = (pre.image.width() as f32 / dpi as f32) * 72.0;
     let height_pt = (pre.image.height() as f32 / dpi as f32) * 72.0;
 
-    Ok(IngestedDocument {
+    Ok(StreamingIngestedDocument {
         source_sha256,
         source_filename,
-        pages: vec![IngestedPage {
+        total_pages: 1,
+        dpi,
+        preprocess: config.preprocess,
+        source: StreamSource::SingleRaster(Some(IngestedPage {
             page_index: 0,
             width_pt,
             height_pt,
@@ -164,7 +212,38 @@ pub fn ingest_bytes(
             image: pre.image,
             native_text: None,
             detected_skew_deg: pre.detected_skew_deg,
-        }],
+        })),
+    })
+}
+
+/// Ingests a PDF, PNG, JPEG, or TIFF file from disk, classifying PDF pages and running
+/// deskew + illumination normalization on scanned/raster inputs.
+pub fn ingest_document(path: &Path, config: &IngestConfig) -> Result<IngestedDocument> {
+    let stream = ingest_document_streaming(path, config)?;
+    let source_sha256 = stream.source_sha256.clone();
+    let source_filename = stream.source_filename.clone();
+    let pages = stream.collect::<Result<Vec<_>>>()?;
+    Ok(IngestedDocument {
+        source_sha256,
+        source_filename,
+        pages,
+    })
+}
+
+/// Ingests a PDF or raster image directly from an in-memory byte slice.
+pub fn ingest_bytes(
+    bytes: &[u8],
+    source_filename: Option<String>,
+    config: &IngestConfig,
+) -> Result<IngestedDocument> {
+    let stream = ingest_bytes_streaming(bytes.to_vec(), source_filename, config)?;
+    let source_sha256 = stream.source_sha256.clone();
+    let source_filename = stream.source_filename.clone();
+    let pages = stream.collect::<Result<Vec<_>>>()?;
+    Ok(IngestedDocument {
+        source_sha256,
+        source_filename,
+        pages,
     })
 }
 

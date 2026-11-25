@@ -15,3 +15,6 @@ base64.workspace = true
 zip.workspace = true
 pdf-writer.workspace = true
 docx-rs.workspace = true
+rust_xlsxwriter.workspace = true
+png.workspace = true
+flate2 = "1"

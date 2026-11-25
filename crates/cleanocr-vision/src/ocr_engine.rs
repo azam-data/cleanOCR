@@ -5,6 +5,26 @@ use cleanocr_ir::{BBox, Block, BlockKind, TextLine, TextSource, TextSpan};
 use image::RgbImage;
 use oar_ocr::oarocr::{OAROCR, OAROCRBuilder};
 
+/// Checks `./models` next to the current executable (and in the current working directory),
+/// returning `Some(dir)` if valid ONNX OCR model files are discovered inside it.
+pub fn discover_default_models_dir() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join("models");
+        if OcrModelPaths::discover_in_dir(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+
+    let cwd_candidate = PathBuf::from("models");
+    if OcrModelPaths::discover_in_dir(&cwd_candidate).is_ok() {
+        return Some(cwd_candidate);
+    }
+
+    None
+}
+
 /// Resolved local file paths for ONNX text detection, text recognition, and character dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OcrModelPaths {
@@ -80,6 +100,12 @@ impl OcrModelPaths {
     }
 }
 
+/// Abstraction over OCR inference so `pipeline` can be tested offline with a mock recognizer.
+pub trait TextRecognizer {
+    fn recognize_page(&self, img: &RgbImage, page_index: usize) -> Result<Vec<Block>>;
+    fn recognize_crop(&self, crop: &RgbImage) -> Result<(String, f32)>;
+}
+
 /// ONNX-backed OCR engine wrapping `oar-ocr`'s `OAROCR` pipeline.
 pub struct OcrEngine {
     inner: OAROCR,
@@ -104,6 +130,17 @@ impl OcrEngine {
     /// Runs ONNX text detection + recognition on `img` and converts detected text regions
     /// into normalized `[0.0, 1.0]` `Block`s.
     pub fn recognize_page(&self, img: &RgbImage, page_index: usize) -> Result<Vec<Block>> {
+        <Self as TextRecognizer>::recognize_page(self, img, page_index)
+    }
+
+    /// Runs ONNX text recognition on a cropped region (such as a padded table cell).
+    pub fn recognize_crop(&self, crop: &RgbImage) -> Result<(String, f32)> {
+        <Self as TextRecognizer>::recognize_crop(self, crop)
+    }
+}
+
+impl TextRecognizer for OcrEngine {
+    fn recognize_page(&self, img: &RgbImage, page_index: usize) -> Result<Vec<Block>> {
         let (w, h) = img.dimensions();
         if w == 0 || h == 0 {
             return Ok(Vec::new());
@@ -161,6 +198,43 @@ impl OcrEngine {
         }
 
         Ok(blocks)
+    }
+
+    fn recognize_crop(&self, crop: &RgbImage) -> Result<(String, f32)> {
+        let (w, h) = crop.dimensions();
+        if w == 0 || h == 0 {
+            return Ok((String::new(), 1.0));
+        }
+
+        let results = self
+            .inner
+            .predict(vec![crop.clone()])
+            .map_err(|e| anyhow::anyhow!("oar-ocr crop inference failed: {e}"))?;
+
+        let Some(page_result) = results.into_iter().next() else {
+            return Ok((String::new(), 1.0));
+        };
+
+        let mut parts = Vec::new();
+        let mut conf_sum = 0.0f32;
+        let mut count = 0usize;
+
+        for region in &page_result.text_regions {
+            if let Some((text, conf)) = region.text_with_confidence() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    parts.push(trimmed.to_string());
+                    conf_sum += conf;
+                    count += 1;
+                }
+            }
+        }
+
+        if count == 0 {
+            Ok((String::new(), 1.0))
+        } else {
+            Ok((parts.join(" "), conf_sum / count as f32))
+        }
     }
 }
 

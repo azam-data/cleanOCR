@@ -1,21 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
 use cleanocr_export::{
     DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PageVisualAssets,
-    PdfExporter,
+    PdfExporter, XlsxExporter,
 };
-use cleanocr_ingest::{IngestConfig, ingest_document};
+use cleanocr_ingest::{IngestConfig, ingest_document_streaming};
 use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
-use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
+use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc, should_bypass_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
-    PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    discover_default_models_dir,
 };
 use eframe::egui;
 
@@ -96,6 +97,7 @@ struct ExportFormats {
     latex: bool,
     markdown: bool,
     docx: bool,
+    xlsx: bool,
 }
 
 impl Default for ExportFormats {
@@ -106,13 +108,14 @@ impl Default for ExportFormats {
             latex: false,
             markdown: true,
             docx: false,
+            xlsx: true,
         }
     }
 }
 
 impl ExportFormats {
     fn any_selected(&self) -> bool {
-        self.pdf_a3 || self.html5 || self.latex || self.markdown || self.docx
+        self.pdf_a3 || self.html5 || self.latex || self.markdown || self.docx || self.xlsx
     }
 }
 
@@ -164,7 +167,7 @@ impl CleanOcrApp {
             active_tab: ActiveTab::Process,
             input_file: None,
             output_dir: None,
-            model_dir: None,
+            model_dir: discover_default_models_dir(),
             formats: ExportFormats::default(),
             mrc_profile: MrcProfile::Lossless,
             accuracy: AccuracyProfile::Standard,
@@ -370,8 +373,8 @@ impl CleanOcrApp {
 
 #[allow(clippy::too_many_arguments)]
 fn run_file_pipeline(
-    input: &PathBuf,
-    out_dir: &PathBuf,
+    input: &Path,
+    out_dir: &Path,
     formats: &ExportFormats,
     mrc_profile: MrcProfile,
     accuracy: AccuracyProfile,
@@ -387,13 +390,16 @@ fn run_file_pipeline(
 
     send_progress(
         0.10,
-        format!("Ingesting {} at {} DPI...", input.display(), dpi),
+        format!("Streaming {} at {} DPI...", input.display(), dpi),
     );
     let ingest_cfg = IngestConfig {
         dpi,
         ..IngestConfig::default()
     };
-    let ingested = ingest_document(input, &ingest_cfg).map_err(|e| e.to_string())?;
+    let mut stream = ingest_document_streaming(input, &ingest_cfg).map_err(|e| e.to_string())?;
+    let source_sha256 = stream.source_sha256.clone();
+    let source_filename = stream.source_filename.clone();
+    let total_pages = stream.total_pages.max(1);
 
     let vision_cfg = VisionConfig {
         profile: match accuracy {
@@ -404,11 +410,18 @@ fn run_file_pipeline(
         ..VisionConfig::default()
     };
 
-    let total_pages = ingested.pages.len().max(1);
-    let mut page_irs = Vec::with_capacity(ingested.pages.len());
-    let mut page_assets = Vec::with_capacity(ingested.pages.len());
+    let ocr_engine = vision_cfg
+        .model_dir
+        .as_deref()
+        .map(OcrEngine::from_model_dir)
+        .transpose()
+        .map_err(|e| e.to_string())?;
 
-    for (idx, page) in ingested.pages.iter().enumerate() {
+    let mut page_irs = Vec::with_capacity(total_pages);
+    let mut page_assets = Vec::with_capacity(total_pages);
+
+    for (idx, page_res) in (&mut stream).enumerate() {
+        let page = page_res.map_err(|e| e.to_string())?;
         let frac = 0.15 + 0.65 * (idx as f32 / total_pages as f32);
         send_progress(
             frac,
@@ -430,6 +443,7 @@ fn run_file_pipeline(
                 native_text: page.native_text.as_deref(),
             },
             &vision_cfg,
+            ocr_engine.as_ref(),
         )
         .map_err(|e| e.to_string())?;
 
@@ -441,11 +455,17 @@ fn run_file_pipeline(
             .map(|b| b.bbox)
             .collect();
 
-        let mut assets =
-            build_page_assets(page.page_index, &page.image, &figure_boxes, mrc_profile)?;
+        let mut assets = build_page_assets(
+            page.page_index,
+            &page.image,
+            &figure_boxes,
+            vision_out.table_grid_mask.as_deref(),
+            mrc_profile,
+        )?;
         assets.figures = vision_out.figures;
         page_assets.push(assets);
         page_irs.push(vision_out.page_ir);
+        drop(page);
     }
 
     let stem = input
@@ -458,8 +478,8 @@ fn run_file_pipeline(
         schema_version: IR_SCHEMA_VERSION.to_string(),
         metadata: DocumentMetadata {
             title: Some(stem.to_string()),
-            source_sha256: ingested.source_sha256,
-            source_filename: ingested.source_filename,
+            source_sha256,
+            source_filename,
             detected_languages: vec!["en".to_string()],
             created_utc: "2026-11-24T00:00:00Z".to_string(),
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -475,7 +495,7 @@ fn run_file_pipeline(
 fn run_scan_pipeline(
     base_url: &str,
     source: ScanSourceUi,
-    out_dir: &PathBuf,
+    out_dir: &Path,
     formats: &ExportFormats,
     mrc_profile: MrcProfile,
     accuracy: AccuracyProfile,
@@ -515,6 +535,13 @@ fn run_scan_pipeline(
         ..VisionConfig::default()
     };
 
+    let ocr_engine = vision_cfg
+        .model_dir
+        .as_deref()
+        .map(OcrEngine::from_model_dir)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+
     let total_pages = scanned_docs.len().max(1);
     let mut page_irs = Vec::with_capacity(scanned_docs.len());
     let mut page_assets = Vec::with_capacity(scanned_docs.len());
@@ -538,6 +565,7 @@ fn run_scan_pipeline(
                     native_text: page.native_text.as_deref(),
                 },
                 &vision_cfg,
+                ocr_engine.as_ref(),
             )
             .map_err(|e| e.to_string())?;
 
@@ -549,7 +577,13 @@ fn run_scan_pipeline(
                 .map(|b| b.bbox)
                 .collect();
 
-            let mut assets = build_page_assets(idx, &page.image, &figure_boxes, mrc_profile)?;
+            let mut assets = build_page_assets(
+                idx,
+                &page.image,
+                &figure_boxes,
+                vision_out.table_grid_mask.as_deref(),
+                mrc_profile,
+            )?;
             assets.figures = vision_out.figures;
             page_assets.push(assets);
             page_irs.push(vision_out.page_ir);
@@ -577,35 +611,32 @@ fn build_page_assets(
     page_index: usize,
     image: &image::RgbImage,
     figure_boxes: &[BBox],
+    table_grid_mask: Option<&[u8]>,
     profile: MrcProfile,
 ) -> Result<PageVisualAssets, String> {
-    let (mrc, fallback_raster_jpeg) = match profile {
-        MrcProfile::None => {
+    let (mrc, fallback_raster_jpeg) =
+        if profile == MrcProfile::None || should_bypass_mrc(figure_boxes) {
             let full_jpg = crop_bbox_to_jpeg(image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)
                 .map_err(|e| e.to_string())?;
             (None, Some(full_jpg))
-        }
-        MrcProfile::Lossless => {
+        } else {
+            let mrc_profile = match profile {
+                MrcProfile::Lossless => MrcCompressionProfile::Lossless,
+                MrcProfile::BookMax => MrcCompressionProfile::BookMax,
+                MrcProfile::None => unreachable!(),
+            };
             let mrc_cfg = MrcConfig {
-                profile: MrcCompressionProfile::Lossless,
+                profile: mrc_profile,
                 ..MrcConfig::default()
             };
             (
-                Some(decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?),
+                Some(
+                    decompose_mrc(image, figure_boxes, table_grid_mask, &mrc_cfg)
+                        .map_err(|e| e.to_string())?,
+                ),
                 None,
             )
-        }
-        MrcProfile::BookMax => {
-            let mrc_cfg = MrcConfig {
-                profile: MrcCompressionProfile::BookMax,
-                ..MrcConfig::default()
-            };
-            (
-                Some(decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?),
-                None,
-            )
-        }
-    };
+        };
 
     Ok(PageVisualAssets {
         page_index,
@@ -618,7 +649,7 @@ fn build_page_assets(
 fn export_all(
     doc_ir: &DocumentIr,
     page_assets: &[PageVisualAssets],
-    out_dir: &PathBuf,
+    out_dir: &Path,
     stem: &str,
     formats: &ExportFormats,
 ) -> Result<String, String> {
@@ -642,6 +673,11 @@ fn export_all(
     if formats.docx {
         DocxExporter
             .export(doc_ir, page_assets, &out_dir.join(format!("{stem}.docx")))
+            .map_err(|e| e.to_string())?;
+    }
+    if formats.xlsx {
+        XlsxExporter
+            .export(doc_ir, page_assets, &out_dir.join(format!("{stem}.xlsx")))
             .map_err(|e| e.to_string())?;
     }
 
@@ -730,6 +766,7 @@ impl eframe::App for CleanOcrApp {
                 ui.checkbox(&mut self.formats.html5, "HTML5");
                 ui.checkbox(&mut self.formats.latex, "LaTeX + pgfplots");
                 ui.checkbox(&mut self.formats.docx, "DOCX");
+                ui.checkbox(&mut self.formats.xlsx, "Excel (.xlsx)");
 
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("MRC Profile").strong());
@@ -848,7 +885,26 @@ impl CleanOcrApp {
         ));
 
         ui.separator();
-        ui.heading("Extracted Text / Markdown Preview");
+        ui.horizontal(|ui| {
+            ui.heading("Extracted Text / Markdown Preview");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Open Output Folder").clicked() {
+                    let dir = self.resolve_output_dir();
+                    let _ = fs::create_dir_all(&dir);
+                    open_folder(&dir);
+                }
+                if ui
+                    .add_enabled(
+                        !self.preview_markdown.is_empty(),
+                        egui::Button::new("Copy Markdown"),
+                    )
+                    .clicked()
+                {
+                    ctx.copy_text(self.preview_markdown.clone());
+                    self.status_text = "Markdown copied to clipboard.".to_string();
+                }
+            });
+        });
         ui.add_space(4.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -935,6 +991,15 @@ impl CleanOcrApp {
     }
 }
 
+fn open_folder(path: &Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -944,6 +1009,19 @@ mod tests {
         let formats = ExportFormats::default();
         assert!(formats.pdf_a3);
         assert!(formats.markdown);
+        assert!(formats.any_selected());
+    }
+
+    #[test]
+    fn export_formats_any_selected_includes_xlsx() {
+        let formats = ExportFormats {
+            pdf_a3: false,
+            html5: false,
+            latex: false,
+            markdown: false,
+            docx: false,
+            xlsx: true,
+        };
         assert!(formats.any_selected());
     }
 }

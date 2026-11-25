@@ -8,9 +8,7 @@ license.workspace = true
 [dependencies]
 cleanocr-ir = { path = "../cleanocr-ir" }
 anyhow.workspace = true
-thiserror.workspace = true
 rayon.workspace = true
 image.workspace = true
-zune-jpeg.workspace = true
 png.workspace = true
 jbig2enc-rust.workspace = true

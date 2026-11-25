@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::{Cursor, Write as _};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use cleanocr_ir::{BBox, Block, BlockKind, DocumentIr, PageIr, TextLine};
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use pdf_writer::{Name, Pdf, Rect, Ref, Str};
 
 use crate::{Exporter, PageVisualAssets};
@@ -44,8 +47,9 @@ pub fn bbox_to_pdf_rect(
     (x_ll, y_ll, width_pt, height_pt)
 }
 
-/// Exports `DocumentIr` + visual assets to a Hybrid Layered PDF/A-3 document with 3 OCG layers,
-/// pixel-aligned invisible text (`3 Tr`), and embedded `cleanocr-ir.json`.
+/// Exports `DocumentIr` + visual assets to a Hybrid Layered PDF/A-3 document with 4 OCG layers
+/// (`Background`, `Graphics`, `Tables`, `Text`), pixel-aligned Unicode invisible text (`3 Tr`),
+/// and embedded `cleanocr-ir.json`.
 pub struct PdfExporter;
 
 impl Exporter for PdfExporter {
@@ -88,11 +92,15 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
     let catalog_id = refs.alloc();
     let page_tree_id = refs.alloc();
     let font_id = refs.alloc();
+    let cid_font_id = refs.alloc();
+    let font_desc_id = refs.alloc();
+    let to_unicode_id = refs.alloc();
 
-    // 3 toggleable Optional Content Groups (layers)
+    // 4 toggleable Optional Content Groups (layers)
     let ocg_bg_id = refs.alloc();
-    let ocg_fg_id = refs.alloc();
-    let ocg_fig_id = refs.alloc();
+    let ocg_gfx_id = refs.alloc();
+    let ocg_tbl_id = refs.alloc();
+    let ocg_txt_id = refs.alloc();
 
     // Embedded canonical JSON IR (PDF/A-3 Associated File)
     let ir_stream_id = refs.alloc();
@@ -100,25 +108,28 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
     let ir_json_bytes =
         serde_json::to_vec(ir).context("failed to serialize DocumentIr for PDF embedding")?;
 
+    // Collect all unique Unicode scalar values for Type0 Identity-H + ToUnicode CMap.
+    let unicode_cmap = build_unicode_cid_map(ir);
+    write_unicode_type0_font(
+        &mut pdf,
+        font_id,
+        cid_font_id,
+        font_desc_id,
+        to_unicode_id,
+        &unicode_cmap,
+    );
+
     // Map page_index -> PageVisualAssets
     let mut assets_by_page: HashMap<usize, &PageVisualAssets> = HashMap::new();
     for asset in assets {
         assets_by_page.insert(asset.page_index, asset);
     }
 
-    // Write font object (used strictly for invisible `3 Tr` text selection layer)
-    {
-        let mut font = pdf.indirect(font_id).dict();
-        font.pair(Name(b"Type"), Name(b"Font"));
-        font.pair(Name(b"Subtype"), Name(b"Type1"));
-        font.pair(Name(b"BaseFont"), Name(b"Helvetica"));
-        font.pair(Name(b"Encoding"), Name(b"WinAnsiEncoding"));
-    }
-
     // Write OCG dictionaries
     write_ocg(&mut pdf, ocg_bg_id, b"Background");
-    write_ocg(&mut pdf, ocg_fg_id, b"Foreground_Ink");
-    write_ocg(&mut pdf, ocg_fig_id, b"Figures_Overlays");
+    write_ocg(&mut pdf, ocg_gfx_id, b"Graphics");
+    write_ocg(&mut pdf, ocg_tbl_id, b"Tables");
+    write_ocg(&mut pdf, ocg_txt_id, b"Text");
 
     // Write embedded cleanocr-ir.json stream and filespec
     {
@@ -142,7 +153,7 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
         ef.pair(Name(b"UF"), ir_stream_id);
     }
 
-    // Emit each page
+    // Emit each page in strict z-order: Background -> Graphics -> Tables -> Text -> Invisible Text
     let mut page_ids = Vec::with_capacity(ir.pages.len());
     for page_ir in &ir.pages {
         let page_id = refs.alloc();
@@ -153,8 +164,8 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
         let mut xobjects: Vec<(String, Ref)> = Vec::new();
         let mut stream_ops = String::with_capacity(2048);
 
-        // Layer 1: Background + Foreground Ink (MRC or fallback raster)
         if let Some(pa) = page_assets {
+            // Layer 1: Background (MRC BG JPEG or full-page fallback raster JPEG)
             if let Some(mrc) = &pa.mrc {
                 let bg_id = refs.alloc();
                 write_jpeg_xobject(
@@ -167,38 +178,10 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
                 );
                 xobjects.push(("BgImg".to_string(), bg_id));
 
-                let mask_id = refs.alloc();
-                write_jbig2_mask_xobject(
-                    &mut pdf,
-                    mask_id,
-                    &mrc.mask_jbig2,
-                    mrc.width.max(1) as i32,
-                    mrc.height.max(1) as i32,
-                );
-
-                let fg_id = refs.alloc();
-                write_jpeg_xobject(
-                    &mut pdf,
-                    fg_id,
-                    &mrc.fg_jpeg,
-                    mrc.fg_width.max(1) as i32,
-                    mrc.fg_height.max(1) as i32,
-                    Some(mask_id),
-                );
-                xobjects.push(("FgImg".to_string(), fg_id));
-
                 let _ = writeln!(stream_ops, "/OC /OCBg BDC");
                 let _ = writeln!(
                     stream_ops,
                     "q {:.3} 0 0 {:.3} 0 0 cm /BgImg Do Q",
-                    page_ir.width_pt, page_ir.height_pt
-                );
-                let _ = writeln!(stream_ops, "EMC");
-
-                let _ = writeln!(stream_ops, "/OC /OCFg BDC");
-                let _ = writeln!(
-                    stream_ops,
-                    "q {:.3} 0 0 {:.3} 0 0 cm /FgImg Do Q",
                     page_ir.width_pt, page_ir.height_pt
                 );
                 let _ = writeln!(stream_ops, "EMC");
@@ -220,39 +203,104 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
                 let _ = writeln!(stream_ops, "EMC");
             }
 
-            // Layer 3: Isolated JPEG Figure Overlays
+            // Layer 2: Graphics (JPEG DCTDecode or PNG FlateDecode RGB + optional /SMask alpha)
             let mut fig_counter = 0usize;
             let mut fig_ops = String::new();
             for block in &page_ir.blocks {
                 if let BlockKind::Figure { asset_id, .. } = &block.kind
                     && let Some(bytes) = pa.figures.get(asset_id)
-                    && bytes.starts_with(&[0xFF, 0xD8, 0xFF])
                 {
                     let (x_ll, y_ll, w_pt, h_pt) =
                         bbox_to_pdf_rect(block.bbox, page_ir.width_pt, page_ir.height_pt);
-                    let (jw, jh) = parse_jpeg_dimensions(bytes)
-                        .unwrap_or((w_pt.round().max(1.0) as i32, h_pt.round().max(1.0) as i32));
-                    let fig_ref = refs.alloc();
                     let name = format!("Fig{fig_counter}");
-                    fig_counter += 1;
-                    write_jpeg_xobject(&mut pdf, fig_ref, bytes, jw, jh, None);
-                    xobjects.push((name.clone(), fig_ref));
-                    let _ = writeln!(
-                        fig_ops,
-                        "q {:.3} 0 0 {:.3} {:.3} {:.3} cm /{name} Do Q",
-                        w_pt, h_pt, x_ll, y_ll
-                    );
+
+                    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+                        let (jw, jh) = parse_jpeg_dimensions(bytes).unwrap_or((
+                            w_pt.round().max(1.0) as i32,
+                            h_pt.round().max(1.0) as i32,
+                        ));
+                        let fig_ref = refs.alloc();
+                        write_jpeg_xobject(&mut pdf, fig_ref, bytes, jw, jh, None);
+                        xobjects.push((name.clone(), fig_ref));
+                        fig_counter += 1;
+                        let _ = writeln!(
+                            fig_ops,
+                            "q {:.3} 0 0 {:.3} {:.3} {:.3} cm /{name} Do Q",
+                            w_pt, h_pt, x_ll, y_ll
+                        );
+                    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+                        && let Some(fig_ref) = write_png_xobject(&mut pdf, &mut refs, bytes)?
+                    {
+                        xobjects.push((name.clone(), fig_ref));
+                        fig_counter += 1;
+                        let _ = writeln!(
+                            fig_ops,
+                            "q {:.3} 0 0 {:.3} {:.3} {:.3} cm /{name} Do Q",
+                            w_pt, h_pt, x_ll, y_ll
+                        );
+                    }
                 }
             }
             if !fig_ops.is_empty() {
-                let _ = writeln!(stream_ops, "/OC /OCFig BDC");
+                let _ = writeln!(stream_ops, "/OC /OCGfx BDC");
                 stream_ops.push_str(&fig_ops);
+                let _ = writeln!(stream_ops, "EMC");
+            }
+
+            // Layer 3 & Layer 4: Tables (1-bit JBIG2 ImageMask) and Text (FG JPEG + Text JBIG2 Mask)
+            if let Some(mrc) = &pa.mrc {
+                if let Some(table_jbig2) = &mrc.table_jbig2 {
+                    let tbl_mask_id = refs.alloc();
+                    write_jbig2_mask_xobject(
+                        &mut pdf,
+                        tbl_mask_id,
+                        table_jbig2,
+                        mrc.width.max(1) as i32,
+                        mrc.height.max(1) as i32,
+                    );
+                    xobjects.push(("TblMask".to_string(), tbl_mask_id));
+
+                    let _ = writeln!(stream_ops, "/OC /OCTbl BDC");
+                    let _ = writeln!(
+                        stream_ops,
+                        "q 0 0 0 rg 0 g {:.3} 0 0 {:.3} 0 0 cm /TblMask Do Q",
+                        page_ir.width_pt, page_ir.height_pt
+                    );
+                    let _ = writeln!(stream_ops, "EMC");
+                }
+
+                let mask_id = refs.alloc();
+                write_jbig2_mask_xobject(
+                    &mut pdf,
+                    mask_id,
+                    &mrc.mask_jbig2,
+                    mrc.width.max(1) as i32,
+                    mrc.height.max(1) as i32,
+                );
+
+                let fg_id = refs.alloc();
+                write_jpeg_xobject(
+                    &mut pdf,
+                    fg_id,
+                    &mrc.fg_jpeg,
+                    mrc.fg_width.max(1) as i32,
+                    mrc.fg_height.max(1) as i32,
+                    Some(mask_id),
+                );
+                xobjects.push(("FgImg".to_string(), fg_id));
+
+                let _ = writeln!(stream_ops, "/OC /OCTxt BDC");
+                let _ = writeln!(
+                    stream_ops,
+                    "q {:.3} 0 0 {:.3} 0 0 cm /FgImg Do Q",
+                    page_ir.width_pt, page_ir.height_pt
+                );
                 let _ = writeln!(stream_ops, "EMC");
             }
         }
 
-        // Layer 2: Invisible Pixel-Aligned Semantic Text Layer (3 Tr)
-        append_invisible_text_ops(page_ir, &mut stream_ops);
+        // Invisible Pixel-Aligned Semantic Unicode Text Layer (3 Tr)
+        append_invisible_text_ops(page_ir, &unicode_cmap, &mut stream_ops);
 
         // Write content stream
         pdf.stream(content_id, stream_ops.as_bytes());
@@ -273,8 +321,9 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
             {
                 let mut props = resources.insert(Name(b"Properties")).dict();
                 props.pair(Name(b"OCBg"), ocg_bg_id);
-                props.pair(Name(b"OCFg"), ocg_fg_id);
-                props.pair(Name(b"OCFig"), ocg_fig_id);
+                props.pair(Name(b"OCGfx"), ocg_gfx_id);
+                props.pair(Name(b"OCTbl"), ocg_tbl_id);
+                props.pair(Name(b"OCTxt"), ocg_txt_id);
             }
 
             if !xobjects.is_empty() {
@@ -293,7 +342,7 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
         pages.count(page_ids.len() as i32);
     }
 
-    // Write Catalog with OCG properties, EmbeddedFiles name tree, and PDF/A-3 AF array
+    // Write Catalog with 4 OCGs, EmbeddedFiles name tree, and PDF/A-3 AF array
     {
         let mut catalog = pdf.catalog(catalog_id);
         catalog.pages(page_tree_id);
@@ -314,8 +363,9 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
                 .insert(Name(b"OCGs"))
                 .array()
                 .item(ocg_bg_id)
-                .item(ocg_fg_id)
-                .item(ocg_fig_id);
+                .item(ocg_gfx_id)
+                .item(ocg_tbl_id)
+                .item(ocg_txt_id);
 
             let mut default_cfg = oc_props.insert(Name(b"D")).dict();
             default_cfg.pair(Name(b"BaseState"), Name(b"ON"));
@@ -323,8 +373,9 @@ pub fn build_pdf_bytes(ir: &DocumentIr, assets: &[PageVisualAssets]) -> Result<V
                 .insert(Name(b"Order"))
                 .array()
                 .item(ocg_bg_id)
-                .item(ocg_fg_id)
-                .item(ocg_fig_id);
+                .item(ocg_gfx_id)
+                .item(ocg_tbl_id)
+                .item(ocg_txt_id);
         }
     }
 
@@ -344,6 +395,231 @@ fn write_ocg(pdf: &mut Pdf, id: Ref, name: &[u8]) {
     let mut ocg = pdf.indirect(id).dict();
     ocg.pair(Name(b"Type"), Name(b"OCG"));
     ocg.pair(Name(b"Name"), Str(name));
+}
+
+fn build_unicode_cid_map(ir: &DocumentIr) -> BTreeMap<char, u16> {
+    let mut map = BTreeMap::new();
+    let mut next_cid: u16 = 1;
+    let mut add_str = |s: &str| {
+        for ch in s.chars() {
+            if !map.contains_key(&ch) && next_cid < u16::MAX {
+                map.insert(ch, next_cid);
+                next_cid += 1;
+            }
+        }
+    };
+
+    for page in &ir.pages {
+        for block in &page.blocks {
+            match &block.kind {
+                BlockKind::Heading { lines, .. }
+                | BlockKind::Paragraph { lines }
+                | BlockKind::Footnote { lines, .. } => {
+                    for l in lines {
+                        for sp in &l.spans {
+                            add_str(&sp.text);
+                        }
+                    }
+                }
+                BlockKind::List { items, .. } => {
+                    for it in items {
+                        for l in &it.lines {
+                            for sp in &l.spans {
+                                add_str(&sp.text);
+                            }
+                        }
+                    }
+                }
+                BlockKind::Table(tbl) => {
+                    for cell in &tbl.cells {
+                        add_str(&cell.text);
+                    }
+                }
+                BlockKind::DisplayFormula { latex, .. } => add_str(latex),
+                BlockKind::HeaderFooter { text, .. } => add_str(text),
+                BlockKind::Figure { .. } => {}
+            }
+        }
+        for overlay in &page.overlays {
+            if let Some(t) = &overlay.extracted_text {
+                add_str(t);
+            }
+        }
+    }
+    map
+}
+
+fn write_unicode_type0_font(
+    pdf: &mut Pdf,
+    font_id: Ref,
+    cid_font_id: Ref,
+    font_desc_id: Ref,
+    to_unicode_id: Ref,
+    unicode_cmap: &BTreeMap<char, u16>,
+) {
+    {
+        let mut f = pdf.indirect(font_id).dict();
+        f.pair(Name(b"Type"), Name(b"Font"));
+        f.pair(Name(b"Subtype"), Name(b"Type0"));
+        f.pair(Name(b"BaseFont"), Name(b"Helvetica"));
+        f.pair(Name(b"Encoding"), Name(b"Identity-H"));
+        f.insert(Name(b"DescendantFonts")).array().item(cid_font_id);
+        f.pair(Name(b"ToUnicode"), to_unicode_id);
+    }
+    {
+        let mut cf = pdf.indirect(cid_font_id).dict();
+        cf.pair(Name(b"Type"), Name(b"Font"));
+        cf.pair(Name(b"Subtype"), Name(b"CIDFontType2"));
+        cf.pair(Name(b"BaseFont"), Name(b"Helvetica"));
+        let mut sys = cf.insert(Name(b"CIDSystemInfo")).dict();
+        sys.pair(Name(b"Registry"), Str(b"Adobe"));
+        sys.pair(Name(b"Ordering"), Str(b"Identity"));
+        sys.pair(Name(b"Supplement"), 0);
+        drop(sys);
+        cf.pair(Name(b"FontDescriptor"), font_desc_id);
+        cf.pair(Name(b"DW"), 500);
+        cf.pair(Name(b"CIDToGIDMap"), Name(b"Identity"));
+    }
+    {
+        let mut fd = pdf.indirect(font_desc_id).dict();
+        fd.pair(Name(b"Type"), Name(b"FontDescriptor"));
+        fd.pair(Name(b"FontName"), Name(b"Helvetica"));
+        fd.pair(Name(b"Flags"), 32);
+        fd.pair(Name(b"FontBBox"), Rect::new(0.0, -200.0, 1000.0, 900.0));
+        fd.pair(Name(b"ItalicAngle"), 0);
+        fd.pair(Name(b"Ascent"), 800);
+        fd.pair(Name(b"Descent"), -200);
+        fd.pair(Name(b"CapHeight"), 700);
+        fd.pair(Name(b"StemV"), 80);
+    }
+
+    let mut cmap = String::from(
+        "/CIDInit /ProcSet findresource begin\n\
+         12 dict begin\n\
+         begincmap\n\
+         /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n\
+         /CMapName /Adobe-Identity-UCS def\n\
+         /CMapType 2 def\n\
+         1 begincodespacerange\n\
+         <0000> <FFFF>\n\
+         endcodespacerange\n",
+    );
+
+    let entries: Vec<(u16, char)> = unicode_cmap.iter().map(|(&ch, &cid)| (cid, ch)).collect();
+    for chunk in entries.chunks(100) {
+        let _ = writeln!(cmap, "{} beginbfchar", chunk.len());
+        for &(cid, ch) in chunk {
+            let mut u16_buf = [0u16; 2];
+            let units = ch.encode_utf16(&mut u16_buf);
+            let mut hex = String::new();
+            for u in units {
+                let _ = write!(hex, "{u:04X}");
+            }
+            let _ = writeln!(cmap, "<{cid:04X}> <{hex}>");
+        }
+        cmap.push_str("endbfchar\n");
+    }
+    cmap.push_str(
+        "endcmap\n\
+         CMapName currentdict /CMap defineresource pop\n\
+         end\n\
+         end\n",
+    );
+
+    pdf.stream(to_unicode_id, cmap.as_bytes());
+}
+
+fn write_png_xobject(
+    pdf: &mut Pdf,
+    refs: &mut RefAllocator,
+    png_bytes: &[u8],
+) -> Result<Option<Ref>> {
+    let mut decoder = png::Decoder::new(Cursor::new(png_bytes));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = match decoder.read_info() {
+        Ok(r) => r,
+        Err(_) => return Ok(None),
+    };
+    let buf_size = reader.output_buffer_size();
+    let mut raw = vec![0u8; buf_size];
+    let info = match reader.next_frame(&mut raw) {
+        Ok(info) => info,
+        Err(_) => return Ok(None),
+    };
+    let raw = &raw[..info.buffer_size()];
+    let w = info.width as i32;
+    let h = info.height as i32;
+
+    let (rgb_pixels, alpha_pixels) = match info.color_type {
+        png::ColorType::Rgb => (raw.to_vec(), None),
+        png::ColorType::Rgba => {
+            let mut rgb = Vec::with_capacity((raw.len() / 4) * 3);
+            let mut alpha = Vec::with_capacity(raw.len() / 4);
+            for px in raw.chunks_exact(4) {
+                rgb.push(px[0]);
+                rgb.push(px[1]);
+                rgb.push(px[2]);
+                alpha.push(px[3]);
+            }
+            (rgb, Some(alpha))
+        }
+        png::ColorType::Grayscale => {
+            let mut rgb = Vec::with_capacity(raw.len() * 3);
+            for &g in raw {
+                rgb.extend_from_slice(&[g, g, g]);
+            }
+            (rgb, None)
+        }
+        png::ColorType::GrayscaleAlpha => {
+            let mut rgb = Vec::with_capacity((raw.len() / 2) * 3);
+            let mut alpha = Vec::with_capacity(raw.len() / 2);
+            for px in raw.chunks_exact(2) {
+                rgb.extend_from_slice(&[px[0], px[0], px[0]]);
+                alpha.push(px[1]);
+            }
+            (rgb, Some(alpha))
+        }
+        png::ColorType::Indexed => return Ok(None),
+    };
+
+    let compressed_rgb = zlib_compress(&rgb_pixels)?;
+    let smask_ref = if let Some(alpha) = alpha_pixels {
+        let compressed_alpha = zlib_compress(&alpha)?;
+        let smask_id = refs.alloc();
+        let mut smask = pdf.stream(smask_id, &compressed_alpha);
+        smask.pair(Name(b"Type"), Name(b"XObject"));
+        smask.pair(Name(b"Subtype"), Name(b"Image"));
+        smask.pair(Name(b"Width"), w);
+        smask.pair(Name(b"Height"), h);
+        smask.pair(Name(b"ColorSpace"), Name(b"DeviceGray"));
+        smask.pair(Name(b"BitsPerComponent"), 8);
+        smask.pair(Name(b"Filter"), Name(b"FlateDecode"));
+        Some(smask_id)
+    } else {
+        None
+    };
+
+    let img_id = refs.alloc();
+    let mut stream = pdf.stream(img_id, &compressed_rgb);
+    stream.pair(Name(b"Type"), Name(b"XObject"));
+    stream.pair(Name(b"Subtype"), Name(b"Image"));
+    stream.pair(Name(b"Width"), w);
+    stream.pair(Name(b"Height"), h);
+    stream.pair(Name(b"ColorSpace"), Name(b"DeviceRGB"));
+    stream.pair(Name(b"BitsPerComponent"), 8);
+    stream.pair(Name(b"Filter"), Name(b"FlateDecode"));
+    if let Some(smask) = smask_ref {
+        stream.pair(Name(b"SMask"), smask);
+    }
+
+    Ok(Some(img_id))
+}
+
+fn zlib_compress(data: &[u8]) -> Result<Vec<u8>> {
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
+    enc.write_all(data)
+        .context("failed to zlib-compress image stream")?;
+    enc.finish().context("failed to finish zlib stream")
 }
 
 fn write_jpeg_xobject(
@@ -378,53 +654,79 @@ fn write_jbig2_mask_xobject(pdf: &mut Pdf, id: Ref, jbig2_bytes: &[u8], width: i
     stream.pair(Name(b"Filter"), Name(b"JBIG2Decode"));
 }
 
-fn append_invisible_text_ops(page: &PageIr, ops: &mut String) {
+fn append_invisible_text_ops(page: &PageIr, unicode_cmap: &BTreeMap<char, u16>, ops: &mut String) {
     for block in &page.blocks {
-        append_block_text_ops(block, page.width_pt, page.height_pt, ops);
+        append_block_text_ops(block, page.width_pt, page.height_pt, unicode_cmap, ops);
     }
     for overlay in &page.overlays {
         if let Some(text) = &overlay.extracted_text {
-            emit_text_span_op(text, overlay.bbox, page.width_pt, page.height_pt, ops);
+            emit_text_span_op(
+                text,
+                overlay.bbox,
+                page.width_pt,
+                page.height_pt,
+                unicode_cmap,
+                ops,
+            );
         }
     }
 }
 
-fn append_block_text_ops(block: &Block, page_w: f32, page_h: f32, ops: &mut String) {
+fn append_block_text_ops(
+    block: &Block,
+    page_w: f32,
+    page_h: f32,
+    unicode_cmap: &BTreeMap<char, u16>,
+    ops: &mut String,
+) {
     match &block.kind {
         BlockKind::Heading { lines, .. }
         | BlockKind::Paragraph { lines }
         | BlockKind::Footnote { lines, .. } => {
-            append_lines_text_ops(lines, page_w, page_h, ops);
+            append_lines_text_ops(lines, page_w, page_h, unicode_cmap, ops);
         }
         BlockKind::List { items, .. } => {
             for item in items {
-                append_lines_text_ops(&item.lines, page_w, page_h, ops);
+                append_lines_text_ops(&item.lines, page_w, page_h, unicode_cmap, ops);
             }
         }
         BlockKind::Table(table) => {
             for cell in &table.cells {
-                emit_text_span_op(&cell.text, cell.bbox, page_w, page_h, ops);
+                emit_text_span_op(&cell.text, cell.bbox, page_w, page_h, unicode_cmap, ops);
             }
         }
         BlockKind::DisplayFormula { latex, .. } => {
-            emit_text_span_op(latex, block.bbox, page_w, page_h, ops);
+            emit_text_span_op(latex, block.bbox, page_w, page_h, unicode_cmap, ops);
         }
         BlockKind::HeaderFooter { text, .. } => {
-            emit_text_span_op(text, block.bbox, page_w, page_h, ops);
+            emit_text_span_op(text, block.bbox, page_w, page_h, unicode_cmap, ops);
         }
         BlockKind::Figure { .. } => {}
     }
 }
 
-fn append_lines_text_ops(lines: &[TextLine], page_w: f32, page_h: f32, ops: &mut String) {
+fn append_lines_text_ops(
+    lines: &[TextLine],
+    page_w: f32,
+    page_h: f32,
+    unicode_cmap: &BTreeMap<char, u16>,
+    ops: &mut String,
+) {
     for line in lines {
         for span in &line.spans {
-            emit_text_span_op(&span.text, span.bbox, page_w, page_h, ops);
+            emit_text_span_op(&span.text, span.bbox, page_w, page_h, unicode_cmap, ops);
         }
     }
 }
 
-fn emit_text_span_op(text: &str, bbox: BBox, page_w: f32, page_h: f32, ops: &mut String) {
+fn emit_text_span_op(
+    text: &str,
+    bbox: BBox,
+    page_w: f32,
+    page_h: f32,
+    unicode_cmap: &BTreeMap<char, u16>,
+    ops: &mut String,
+) {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return;
@@ -432,27 +734,16 @@ fn emit_text_span_op(text: &str, bbox: BBox, page_w: f32, page_h: f32, ops: &mut
 
     let (x_ll, y_ll, _w_pt, h_pt) = bbox_to_pdf_rect(bbox, page_w, page_h);
     let font_size = (h_pt * 0.85).clamp(4.0, 96.0);
-    let escaped = escape_pdf_literal(trimmed);
+    let mut hex_cids = String::with_capacity(trimmed.chars().count() * 4);
+    for ch in trimmed.chars() {
+        let cid = unicode_cmap.get(&ch).copied().unwrap_or(0);
+        let _ = write!(hex_cids, "{cid:04X}");
+    }
 
     let _ = writeln!(
         ops,
-        "BT /F1 {font_size:.2} Tf 3 Tr 1 0 0 1 {x_ll:.2} {y_ll:.2} Tm ({escaped}) Tj ET"
+        "BT /F1 {font_size:.2} Tf 3 Tr 1 0 0 1 {x_ll:.2} {y_ll:.2} Tm <{hex_cids}> Tj ET"
     );
-}
-
-fn escape_pdf_literal(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '\\' => out.push_str(r"\\"),
-            '(' => out.push_str(r"\("),
-            ')' => out.push_str(r"\)"),
-            '\r' | '\n' => out.push(' '),
-            c if c.is_ascii() && !c.is_ascii_control() => out.push(c),
-            _ => out.push('?'),
-        }
-    }
-    out
 }
 
 fn parse_jpeg_dimensions(data: &[u8]) -> Option<(i32, i32)> {
@@ -663,6 +954,7 @@ mod tests {
                 width: 600,
                 height: 800,
                 mask_jbig2: vec![0x97, 0x4A, 0x42, 0x32],
+                table_jbig2: None,
                 mask_png_1bit: vec![137, 80, 78, 71],
                 fg_jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9],
                 fg_width: 200,
@@ -680,12 +972,136 @@ mod tests {
 
         let pdf_text = String::from_utf8_lossy(&pdf_bytes);
         assert!(pdf_text.contains("(Background)"));
-        assert!(pdf_text.contains("(Foreground_Ink)"));
-        assert!(pdf_text.contains("(Figures_Overlays)"));
+        assert!(pdf_text.contains("(Graphics)"));
+        assert!(pdf_text.contains("(Tables)"));
+        assert!(pdf_text.contains("(Text)"));
         assert!(pdf_text.contains("/JBIG2Decode"));
+        assert!(pdf_text.contains("/ToUnicode"));
         assert!(pdf_text.contains("3 Tr"));
-        assert!(pdf_text.contains("(Executive Summary) Tj"));
+        assert!(pdf_text.contains("> Tj"));
         assert!(pdf_text.contains("/AFRelationship /Data"));
+
+        let roundtripped = extract_ir_from_pdf(&pdf_bytes).expect("extract IR from PDF");
+        assert_eq!(roundtripped, ir);
+    }
+
+    #[test]
+    fn pdf_4_layer_ocgs_png_smask_table_jbig2_and_unicode_tounicode() {
+        // Encode a 2x2 RGBA PNG with transparency.
+        let mut rgba_png = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut rgba_png, 2, 2);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().expect("png header");
+            writer
+                .write_image_data(&[
+                    20, 90, 210, 255, 255, 255, 255, 0, 20, 90, 210, 255, 255, 255, 255, 0,
+                ])
+                .expect("png data");
+        }
+
+        let b = BBox::new(0.10, 0.12, 0.60, 0.18);
+        let ir = DocumentIr {
+            schema_version: IR_SCHEMA_VERSION.to_string(),
+            metadata: DocumentMetadata {
+                title: Some("Bank Circular".to_string()),
+                source_sha256: "deadbeef".to_string(),
+                source_filename: Some("bank.pdf".to_string()),
+                detected_languages: vec!["en".to_string(), "bn".to_string()],
+                created_utc: "2026-11-25T00:00:00Z".to_string(),
+                engine_version: "0.1.0".to_string(),
+            },
+            pages: vec![PageIr {
+                page_index: 0,
+                width_pt: 595.0,
+                height_pt: 842.0,
+                dpi: 300,
+                ingest_mode: PageIngestMode::ScannedRaster,
+                blocks: vec![
+                    Block {
+                        id: "p0_p0".to_string(),
+                        bbox: b,
+                        reading_order: 0,
+                        column_index: None,
+                        confidence: 0.99,
+                        kind: BlockKind::Paragraph {
+                            lines: vec![TextLine {
+                                bbox: b,
+                                spans: vec![TextSpan {
+                                    text: "৳1,250.00".to_string(),
+                                    bbox: b,
+                                    confidence: 0.99,
+                                    is_bold: false,
+                                    is_italic: false,
+                                    inline_math_latex: None,
+                                    source: TextSource::Ocr,
+                                }],
+                            }],
+                        },
+                    },
+                    Block {
+                        id: "p0_fig0".to_string(),
+                        bbox: BBox::new(0.05, 0.04, 0.20, 0.10),
+                        reading_order: 1,
+                        column_index: None,
+                        confidence: 0.95,
+                        kind: BlockKind::Figure {
+                            asset_id: "logo_rgba".to_string(),
+                            caption: None,
+                            alt_text: Some("Bank Logo".to_string()),
+                            is_chart: false,
+                            chart_data: None,
+                            tikz_source: None,
+                        },
+                    },
+                ],
+                overlays: Vec::new(),
+                low_confidence_flags: Vec::new(),
+            }],
+        };
+
+        let mut figures = BTreeMap::new();
+        figures.insert("logo_rgba".to_string(), rgba_png);
+
+        let assets = vec![PageVisualAssets {
+            page_index: 0,
+            mrc: Some(MrcLayers {
+                width: 600,
+                height: 800,
+                mask_jbig2: vec![0x97, 0x4A, 0x42, 0x32],
+                table_jbig2: Some(vec![0x97, 0x4A, 0x42, 0x33]),
+                mask_png_1bit: vec![137, 80, 78, 71],
+                fg_jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9],
+                fg_width: 200,
+                fg_height: 267,
+                bg_jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9],
+                bg_width: 300,
+                bg_height: 400,
+            }),
+            fallback_raster_jpeg: None,
+            figures,
+        }];
+
+        let pdf_bytes = build_pdf_bytes(&ir, &assets).expect("build 4-layer PDF bytes");
+        let pdf_text = String::from_utf8_lossy(&pdf_bytes);
+
+        for required in [
+            "(Background)",
+            "(Graphics)",
+            "(Tables)",
+            "(Text)",
+            "/SMask",
+            "/JBIG2Decode",
+            "/ToUnicode",
+            "/TblMask Do",
+            "<09F3>", // UTF-16BE code point for '৳' in ToUnicode CMap
+        ] {
+            assert!(
+                pdf_text.contains(required),
+                "PDF missing required token: {required}"
+            );
+        }
 
         let roundtripped = extract_ir_from_pdf(&pdf_bytes).expect("extract IR from PDF");
         assert_eq!(roundtripped, ir);

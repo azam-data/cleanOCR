@@ -62,52 +62,115 @@ impl Default for MrcConfig {
 pub struct MrcLayers {
     pub width: u32,
     pub height: u32,
-    /// Full-resolution 1-bit JBIG2 stream for PDF `/Mask` XObjects.
+    /// Full-resolution 1-bit JBIG2 stream for PDF `/Mask` XObjects (text strokes only).
     pub mask_jbig2: Vec<u8>,
+    /// Optional full-resolution 1-bit JBIG2 stream for PDF `Tables` OCG (table grid rulings only).
+    pub table_jbig2: Option<Vec<u8>>,
     /// Full-resolution 1-bit PNG for HTML CSS `mask-image`.
     pub mask_png_1bit: Vec<u8>,
     /// Downsampled RGB JPEG foreground ink layer.
     pub fg_jpeg: Vec<u8>,
     pub fg_width: u32,
     pub fg_height: u32,
-    /// Downsampled RGB JPEG background layer with text inpainted out.
+    /// Downsampled RGB JPEG background layer with text and table lines inpainted out.
     pub bg_jpeg: Vec<u8>,
     pub bg_width: u32,
     pub bg_height: u32,
 }
 
 impl MrcLayers {
-    /// Total compressed payload size in bytes for PDF embedding (JBIG2 mask + FG JPEG + BG JPEG).
+    /// Total compressed payload size in bytes for PDF embedding (JBIG2 masks + FG JPEG + BG JPEG).
     pub fn total_pdf_bytes(&self) -> usize {
-        self.mask_jbig2.len() + self.fg_jpeg.len() + self.bg_jpeg.len()
+        self.mask_jbig2.len()
+            + self.table_jbig2.as_ref().map_or(0, Vec::len)
+            + self.fg_jpeg.len()
+            + self.bg_jpeg.len()
     }
 }
 
-/// Decomposes a full-resolution RGB page into 3 MRC layers (1-bit Mask + FG JPEG + BG JPEG).
+/// Returns `true` when `figure_boxes` cover more than 65% of the page area, indicating
+/// an image-heavy page that should bypass 4-layer MRC and use a single compressed JPEG.
+pub fn should_bypass_mrc(figure_boxes: &[BBox]) -> bool {
+    if figure_boxes.is_empty() {
+        return false;
+    }
+    const GRID: usize = 100;
+    let mut covered = [false; GRID * GRID];
+    for b in figure_boxes {
+        let x0 = ((b.x0.clamp(0.0, 1.0) * GRID as f32).floor() as usize).min(GRID);
+        let y0 = ((b.y0.clamp(0.0, 1.0) * GRID as f32).floor() as usize).min(GRID);
+        let x1 = ((b.x1.clamp(0.0, 1.0) * GRID as f32).ceil() as usize).min(GRID);
+        let y1 = ((b.y1.clamp(0.0, 1.0) * GRID as f32).ceil() as usize).min(GRID);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                covered[y * GRID + x] = true;
+            }
+        }
+    }
+    let count = covered.iter().filter(|&&c| c).count();
+    (count as f32 / (GRID * GRID) as f32) > 0.65
+}
+
+/// Decomposes a full-resolution RGB page into MRC layers (1-bit Text Mask + optional 1-bit Table
+/// Grid Mask + FG JPEG + BG JPEG).
 ///
 /// `figure_boxes` are normalized `[0.0, 1.0]` bounding boxes of photographs/figures that must
 /// remain protected in the continuous-tone background layer.
 pub fn decompose_mrc(
     page_img: &RgbImage,
     figure_boxes: &[BBox],
+    table_grid_mask: Option<&[u8]>,
     config: &MrcConfig,
 ) -> Result<MrcLayers> {
     let width = page_img.width();
     let height = page_img.height();
 
     // 1. Extract 1-bit foreground ink mask (photo-protected Sauvola + colored ink + despeckle).
-    let ink_mask = extract_ink_mask(page_img, figure_boxes, &config.binarize);
+    let mut ink_mask = extract_ink_mask(page_img, figure_boxes, &config.binarize);
 
-    // 2. Encode 1-bit mask to JBIG2 (PDF fragment mode) and 1-bit PNG (HTML CSS mask-image).
+    // 2. Subtract table_grid_mask from the 1-bit text mask and encode table_jbig2 separately.
+    let mut table_bool = vec![false; ink_mask.len()];
+    let mut table_jbig2 = None;
+    if let Some(tmask) = table_grid_mask
+        && tmask.len() == ink_mask.len()
+    {
+        let mut any_table = false;
+        for ((dst, &src), text_px) in table_bool
+            .iter_mut()
+            .zip(tmask.iter())
+            .zip(ink_mask.iter_mut())
+        {
+            if src != 0 {
+                *dst = true;
+                *text_px = false;
+                any_table = true;
+            }
+        }
+        if any_table {
+            table_jbig2 = Some(encode_mask_jbig2(
+                &table_bool,
+                width,
+                height,
+                config.profile,
+            )?);
+        }
+    }
+
+    // 3. Encode 1-bit text mask to JBIG2 (PDF fragment mode) and 1-bit PNG (HTML CSS mask-image).
     let mask_jbig2 = encode_mask_jbig2(&ink_mask, width, height, config.profile)?;
     let mask_png_1bit = encode_mask_png_1bit(&ink_mask, width, height)?;
 
-    // 3. Halo-free Pull-Push inpainting at full resolution BEFORE downsampling.
-    let bg_known: Vec<bool> = ink_mask.iter().map(|&is_ink| !is_ink).collect();
+    // 4. Halo-free Pull-Push inpainting at full resolution BEFORE downsampling
+    //    (inpaint BOTH text pixels and table_grid_mask pixels out of BG).
+    let bg_known: Vec<bool> = ink_mask
+        .iter()
+        .zip(table_bool.iter())
+        .map(|(&is_ink, &is_tbl)| !is_ink && !is_tbl)
+        .collect();
     let bg_full = pull_push_inpaint(page_img, &bg_known);
     let fg_full = pull_push_inpaint(page_img, &ink_mask);
 
-    // 4. Downsample FG and BG layers and encode to RGB JPEG.
+    // 5. Downsample FG and BG layers and encode to RGB JPEG.
     let fg_width = (width / config.fg_downsample.max(1)).max(1);
     let fg_height = (height / config.fg_downsample.max(1)).max(1);
     let fg_small = resize(&fg_full, fg_width, fg_height, FilterType::Triangle);
@@ -122,6 +185,7 @@ pub fn decompose_mrc(
         width,
         height,
         mask_jbig2,
+        table_jbig2,
         mask_png_1bit,
         fg_jpeg,
         fg_width,
@@ -212,11 +276,12 @@ mod tests {
         }
 
         let baseline_jpeg = encode_rgb_jpeg(&page, 85).expect("encode baseline JPEG");
-        let layers = decompose_mrc(&page, &[], &MrcConfig::default()).expect("decompose MRC");
+        let layers = decompose_mrc(&page, &[], None, &MrcConfig::default()).expect("decompose MRC");
 
         assert_eq!(layers.width, w);
         assert_eq!(layers.height, h);
         assert!(!layers.mask_jbig2.is_empty());
+        assert!(layers.table_jbig2.is_none());
         assert!(layers.mask_png_1bit.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(layers.fg_jpeg.starts_with(&[0xFF, 0xD8, 0xFF]));
         assert!(layers.bg_jpeg.starts_with(&[0xFF, 0xD8, 0xFF]));
@@ -228,5 +293,34 @@ mod tests {
             baseline_jpeg.len(),
             layers.total_pdf_bytes()
         );
+    }
+
+    #[test]
+    fn bypasses_mrc_when_photo_coverage_exceeds_65_percent() {
+        assert!(!should_bypass_mrc(&[BBox::new(0.1, 0.1, 0.5, 0.5)]));
+        assert!(should_bypass_mrc(&[BBox::new(0.05, 0.05, 0.90, 0.94)]));
+    }
+
+    #[test]
+    fn splits_table_grid_mask_into_separate_table_jbig2_stream() {
+        let w = 120u32;
+        let h = 120u32;
+        let mut page = RgbImage::from_pixel(w, h, Rgb([250, 250, 250]));
+        let mut table_mask = vec![0u8; (w * h) as usize];
+
+        for x in 10..110 {
+            page.put_pixel(x, 30, Rgb([10, 10, 10]));
+            table_mask[30 * w as usize + x as usize] = 1;
+        }
+        for y in 50..62 {
+            for x in 20..80 {
+                page.put_pixel(x, y, Rgb([15, 15, 15]));
+            }
+        }
+
+        let layers = decompose_mrc(&page, &[], Some(&table_mask), &MrcConfig::default())
+            .expect("decompose MRC with table mask");
+        assert!(layers.table_jbig2.is_some());
+        assert!(!layers.table_jbig2.unwrap().is_empty());
     }
 }

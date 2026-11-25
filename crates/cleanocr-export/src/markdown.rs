@@ -308,7 +308,7 @@ fn escape_pipe_cell(input: &str) -> String {
 }
 
 fn escape_md_alt(input: &str) -> String {
-    input.replace('[', r"[").replace(']', r"]")
+    input.replace('[', r"\[").replace(']', r"\]")
 }
 
 fn escape_html(input: &str) -> String {
