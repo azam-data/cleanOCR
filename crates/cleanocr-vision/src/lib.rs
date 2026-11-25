@@ -4,6 +4,7 @@ pub mod assets;
 pub mod ocr_engine;
 pub mod pipeline;
 pub mod table_lattice;
+pub mod table_stream;
 
 pub use assets::{crop_bbox_to_jpeg, crop_bbox_to_png, vectorize_overlay_svg};
 pub use ocr_engine::{OcrEngine, OcrModelPaths, TextRecognizer, discover_default_models_dir};
@@ -15,6 +16,7 @@ pub use table_lattice::{
     DetectedCell, DetectedTableGrid, LatticeDetectionResult, LineSegment, crop_cell_padded,
     detect_lattice_tables, erase_table_grid_lines,
 };
+pub use table_stream::{detect_stream_tables, split_financial_span};
 
 #[cfg(test)]
 mod tests {

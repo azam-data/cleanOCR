@@ -207,12 +207,24 @@ fn find_projection_cuts(intervals: impl Iterator<Item = (f32, f32)>, min_gutter:
 
 fn sort_top_to_bottom_left_to_right(blocks: &[Block], indices: &mut [usize]) {
     indices.sort_by(|&a, &b| {
-        blocks[a]
-            .bbox
-            .y0
-            .total_cmp(&blocks[b].bbox.y0)
-            .then_with(|| blocks[a].bbox.x0.total_cmp(&blocks[b].bbox.x0))
-            .then_with(|| blocks[a].id.cmp(&blocks[b].id))
+        let ha = blocks[a].bbox.height();
+        let hb = blocks[b].bbox.height();
+        let cya = 0.5 * (blocks[a].bbox.y0 + blocks[a].bbox.y1);
+        let cyb = 0.5 * (blocks[b].bbox.y0 + blocks[b].bbox.y1);
+        let y_tol = 0.5 * ha.min(hb);
+
+        if (cya - cyb).abs() <= y_tol {
+            blocks[a]
+                .bbox
+                .x0
+                .total_cmp(&blocks[b].bbox.x0)
+                .then_with(|| cya.total_cmp(&cyb))
+                .then_with(|| blocks[a].id.cmp(&blocks[b].id))
+        } else {
+            cya.total_cmp(&cyb)
+                .then_with(|| blocks[a].bbox.x0.total_cmp(&blocks[b].bbox.x0))
+                .then_with(|| blocks[a].id.cmp(&blocks[b].id))
+        }
     });
 }
 
@@ -361,5 +373,58 @@ mod tests {
         sort_reading_order(&mut single);
         assert_eq!(single[0].reading_order, 0);
         assert_eq!(single[0].column_index, None);
+    }
+
+    #[test]
+    fn wide_table_stays_atomic_with_adjacent_multicolumn_text() {
+        use crate::schema::{TableCell, TableIr};
+
+        let table_bbox = BBox::new(0.10, 0.12, 0.90, 0.42);
+        let table_block = Block {
+            id: "wide_table".to_string(),
+            bbox: table_bbox,
+            reading_order: 0,
+            column_index: None,
+            confidence: 0.99,
+            kind: BlockKind::Table(TableIr {
+                num_rows: 2,
+                num_cols: 2,
+                caption: None,
+                cells: vec![
+                    TableCell {
+                        row: 0,
+                        col: 0,
+                        row_span: 1,
+                        col_span: 1,
+                        is_header: true,
+                        bbox: BBox::new(0.10, 0.12, 0.48, 0.25),
+                        text: "A".to_string(),
+                    },
+                    TableCell {
+                        row: 0,
+                        col: 1,
+                        row_span: 1,
+                        col_span: 1,
+                        is_header: true,
+                        bbox: BBox::new(0.52, 0.12, 0.90, 0.25),
+                        text: "B".to_string(),
+                    },
+                ],
+            }),
+        };
+
+        let mut blocks = vec![
+            make_para("right_col", 0.54, 0.48, 0.90, 0.80),
+            table_block,
+            make_para("left_col", 0.10, 0.48, 0.46, 0.80),
+        ];
+
+        sort_reading_order(&mut blocks);
+
+        let ids: Vec<&str> = blocks.iter().map(|b| b.id.as_str()).collect();
+        assert_eq!(ids, vec!["wide_table", "left_col", "right_col"]);
+        assert_eq!(blocks[0].column_index, None);
+        assert_eq!(blocks[1].column_index, Some(0));
+        assert_eq!(blocks[2].column_index, Some(1));
     }
 }

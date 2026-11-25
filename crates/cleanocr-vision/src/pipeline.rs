@@ -11,6 +11,7 @@ use image::RgbImage;
 use crate::assets::crop_bbox_to_png;
 use crate::ocr_engine::{OcrEngine, TextRecognizer};
 use crate::table_lattice::{crop_cell_padded, detect_lattice_tables, erase_table_grid_lines};
+use crate::table_stream::detect_stream_tables;
 
 /// Vision/OCR accuracy profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -113,6 +114,8 @@ pub fn analyze_page_with_recognizer<R: TextRecognizer + ?Sized>(
             }
         }
     }
+
+    blocks = detect_stream_tables(blocks, input.page_index);
 
     // Enforce canonical Recursive XY-Cut reading order on every page.
     sort_reading_order(&mut blocks);
