@@ -419,6 +419,108 @@ fn cluster_coords(mut coords: Vec<u32>, tol: u32) -> Vec<u32> {
     clusters
 }
 
+/// Replaces `table_grid_mask` ruling pixels with the median RGB of neighboring non-mask pixels
+/// in a 5x5 window, while preserving crossing character strokes on perpendicular sides.
+pub fn erase_table_grid_lines(img: &RgbImage, table_grid_mask: &[u8]) -> RgbImage {
+    let w = img.width() as usize;
+    let h = img.height() as usize;
+    if w == 0 || h == 0 || table_grid_mask.len() != w * h {
+        return img.clone();
+    }
+
+    let mut out = img.clone();
+    let is_dark = |x: usize, y: usize| -> bool {
+        let p = img.get_pixel(x as u32, y as u32);
+        (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) < 170.0
+    };
+
+    let mut neighbors: Vec<[u8; 3]> = Vec::with_capacity(25);
+    for y in 0..h {
+        for x in 0..w {
+            let idx = y * w + x;
+            if table_grid_mask[idx] == 0 {
+                continue;
+            }
+
+            // Preserve crossing character strokes where dark non-mask ink appears on both
+            // perpendicular sides of the ruling pixel.
+            let vertical_crossing = y > 0
+                && y + 1 < h
+                && table_grid_mask[(y - 1) * w + x] == 0
+                && table_grid_mask[(y + 1) * w + x] == 0
+                && is_dark(x, y - 1)
+                && is_dark(x, y + 1);
+            let horizontal_crossing = x > 0
+                && x + 1 < w
+                && table_grid_mask[y * w + x - 1] == 0
+                && table_grid_mask[y * w + x + 1] == 0
+                && is_dark(x - 1, y)
+                && is_dark(x + 1, y);
+
+            if vertical_crossing || horizontal_crossing {
+                continue;
+            }
+
+            neighbors.clear();
+            let y0 = y.saturating_sub(2);
+            let y1 = (y + 2).min(h - 1);
+            let x0 = x.saturating_sub(2);
+            let x1 = (x + 2).min(w - 1);
+
+            for ny in y0..=y1 {
+                for nx in x0..=x1 {
+                    if table_grid_mask[ny * w + nx] == 0 {
+                        neighbors.push(img.get_pixel(nx as u32, ny as u32).0);
+                    }
+                }
+            }
+
+            if neighbors.is_empty() {
+                out.put_pixel(x as u32, y as u32, image::Rgb([255, 255, 255]));
+            } else {
+                neighbors.sort_by_key(|p| {
+                    (0.299 * p[0] as f32 + 0.587 * p[1] as f32 + 0.114 * p[2] as f32) as u16
+                });
+                let median = neighbors[neighbors.len() / 2];
+                out.put_pixel(x as u32, y as u32, image::Rgb(median));
+            }
+        }
+    }
+
+    out
+}
+
+/// Crops a table cell from `cleaned_img` (inset 1–2 px from borders) and surrounds it with
+/// 4 px horizontal and 3 px vertical white `[255, 255, 255]` padding for accurate digit OCR.
+pub fn crop_cell_padded(cleaned_img: &RgbImage, bbox: BBox) -> RgbImage {
+    let w = cleaned_img.width();
+    let h = cleaned_img.height();
+    let (x0, y0, x1, y1) = bbox.to_pixels(w, h);
+
+    let inset_x = if x1.saturating_sub(x0) > 6 { 2 } else { 1 };
+    let inset_y = if y1.saturating_sub(y0) > 6 { 2 } else { 1 };
+
+    let ix0 = x0.saturating_add(inset_x).min(w);
+    let iy0 = y0.saturating_add(inset_y).min(h);
+    let ix1 = x1.saturating_sub(inset_x).max(ix0.saturating_add(1)).min(w);
+    let iy1 = y1.saturating_sub(inset_y).max(iy0.saturating_add(1)).min(h);
+
+    let cw = ix1.saturating_sub(ix0).max(1);
+    let ch = iy1.saturating_sub(iy0).max(1);
+
+    let pad_x = 4u32;
+    let pad_y = 3u32;
+    let mut padded =
+        RgbImage::from_pixel(cw + pad_x * 2, ch + pad_y * 2, image::Rgb([255, 255, 255]));
+    for dy in 0..ch {
+        for dx in 0..cw {
+            let px = *cleaned_img.get_pixel(ix0 + dx, iy0 + dy);
+            padded.put_pixel(pad_x + dx, pad_y + dy, px);
+        }
+    }
+    padded
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,5 +587,54 @@ mod tests {
             .expect("merged section header cell at row 1, col 0");
         assert_eq!(merged_cell.col_span, 4);
         assert_eq!(merged_cell.row_span, 1);
+    }
+
+    #[test]
+    fn erases_vertical_border_while_preserving_adjacent_digits() {
+        let w = 240u32;
+        let h = 120u32;
+        let mut img = RgbImage::from_pixel(w, h, Rgb([252, 252, 252]));
+        let black = Rgb([10, 10, 10]);
+
+        // Draw a 2x2 bordered box so lattice detector catches the vertical border at x=40..=41.
+        for x in 40..=200 {
+            img.put_pixel(x, 20, black);
+            img.put_pixel(x, 100, black);
+        }
+        for y in 20..=100 {
+            img.put_pixel(40, y, black);
+            img.put_pixel(41, y, black);
+            img.put_pixel(200, y, black);
+        }
+
+        // Draw crisp dark "10.00%" ink strokes starting just 1 px right of the vertical border (x=43).
+        let digit_pixels = [
+            (43u32, 55u32),
+            (43, 56),
+            (43, 57),
+            (43, 58),
+            (48, 56),
+            (52, 57),
+        ];
+        for &(x, y) in &digit_pixels {
+            img.put_pixel(x, y, black);
+        }
+
+        let lattice = detect_lattice_tables(&img);
+        assert_eq!(lattice.table_grid_mask[56 * w as usize + 40], 1);
+
+        let cleaned = erase_table_grid_lines(&img, &lattice.table_grid_mask);
+        // Vertical border at x=40 must be erased to near-white paper background.
+        assert!(
+            cleaned.get_pixel(40, 56)[0] > 230,
+            "border pixel at x=40 must be erased"
+        );
+        // Adjacent digit ink at x=43 (1 px from border) must remain intact.
+        for &(x, y) in &digit_pixels {
+            assert!(
+                cleaned.get_pixel(x, y)[0] < 30,
+                "digit pixel ({x}, {y}) must remain intact"
+            );
+        }
     }
 }

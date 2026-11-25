@@ -17,3 +17,6 @@ rayon.workspace = true
 image.workspace = true
 vtracer.workspace = true
 oar-ocr.workspace = true
+
+[dev-dependencies]
+cleanocr-export = { path = "../cleanocr-export" }

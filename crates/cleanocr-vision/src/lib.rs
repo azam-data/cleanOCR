@@ -6,12 +6,14 @@ pub mod pipeline;
 pub mod table_lattice;
 
 pub use assets::{crop_bbox_to_jpeg, crop_bbox_to_png, vectorize_overlay_svg};
-pub use ocr_engine::{OcrEngine, OcrModelPaths, discover_default_models_dir};
+pub use ocr_engine::{OcrEngine, OcrModelPaths, TextRecognizer, discover_default_models_dir};
 pub use pipeline::{
     PageAnalysisInput, PageVisionOutput, VisionConfig, VisionProfile, analyze_page,
+    analyze_page_with_recognizer,
 };
 pub use table_lattice::{
-    DetectedCell, DetectedTableGrid, LatticeDetectionResult, LineSegment, detect_lattice_tables,
+    DetectedCell, DetectedTableGrid, LatticeDetectionResult, LineSegment, crop_cell_padded,
+    detect_lattice_tables, erase_table_grid_lines,
 };
 
 #[cfg(test)]
