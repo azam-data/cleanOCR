@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use cleanocr_export::{
     DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PageVisualAssets,
-    PdfExporter,
+    PdfExporter, XlsxExporter,
 };
 use cleanocr_ingest::{IngestConfig, ingest_document};
 use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
@@ -16,6 +16,7 @@ use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
     OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    discover_default_models_dir,
 };
 use eframe::egui;
 
@@ -96,6 +97,7 @@ struct ExportFormats {
     latex: bool,
     markdown: bool,
     docx: bool,
+    xlsx: bool,
 }
 
 impl Default for ExportFormats {
@@ -106,13 +108,14 @@ impl Default for ExportFormats {
             latex: false,
             markdown: true,
             docx: false,
+            xlsx: true,
         }
     }
 }
 
 impl ExportFormats {
     fn any_selected(&self) -> bool {
-        self.pdf_a3 || self.html5 || self.latex || self.markdown || self.docx
+        self.pdf_a3 || self.html5 || self.latex || self.markdown || self.docx || self.xlsx
     }
 }
 
@@ -164,7 +167,7 @@ impl CleanOcrApp {
             active_tab: ActiveTab::Process,
             input_file: None,
             output_dir: None,
-            model_dir: None,
+            model_dir: discover_default_models_dir(),
             formats: ExportFormats::default(),
             mrc_profile: MrcProfile::Lossless,
             accuracy: AccuracyProfile::Standard,
@@ -660,6 +663,11 @@ fn export_all(
             .export(doc_ir, page_assets, &out_dir.join(format!("{stem}.docx")))
             .map_err(|e| e.to_string())?;
     }
+    if formats.xlsx {
+        XlsxExporter
+            .export(doc_ir, page_assets, &out_dir.join(format!("{stem}.xlsx")))
+            .map_err(|e| e.to_string())?;
+    }
 
     let md_preview = if formats.markdown {
         let md_path = out_dir.join(format!("{stem}.md"));
@@ -746,6 +754,7 @@ impl eframe::App for CleanOcrApp {
                 ui.checkbox(&mut self.formats.html5, "HTML5");
                 ui.checkbox(&mut self.formats.latex, "LaTeX + pgfplots");
                 ui.checkbox(&mut self.formats.docx, "DOCX");
+                ui.checkbox(&mut self.formats.xlsx, "Excel (.xlsx)");
 
                 ui.add_space(10.0);
                 ui.label(egui::RichText::new("MRC Profile").strong());
@@ -864,7 +873,26 @@ impl CleanOcrApp {
         ));
 
         ui.separator();
-        ui.heading("Extracted Text / Markdown Preview");
+        ui.horizontal(|ui| {
+            ui.heading("Extracted Text / Markdown Preview");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Open Output Folder").clicked() {
+                    let dir = self.resolve_output_dir();
+                    let _ = fs::create_dir_all(&dir);
+                    open_folder(&dir);
+                }
+                if ui
+                    .add_enabled(
+                        !self.preview_markdown.is_empty(),
+                        egui::Button::new("Copy Markdown"),
+                    )
+                    .clicked()
+                {
+                    ctx.copy_text(self.preview_markdown.clone());
+                    self.status_text = "Markdown copied to clipboard.".to_string();
+                }
+            });
+        });
         ui.add_space(4.0);
 
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -951,6 +979,15 @@ impl CleanOcrApp {
     }
 }
 
+fn open_folder(path: &Path) {
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("explorer").arg(path).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(path).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(path).spawn();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,6 +997,19 @@ mod tests {
         let formats = ExportFormats::default();
         assert!(formats.pdf_a3);
         assert!(formats.markdown);
+        assert!(formats.any_selected());
+    }
+
+    #[test]
+    fn export_formats_any_selected_includes_xlsx() {
+        let formats = ExportFormats {
+            pdf_a3: false,
+            html5: false,
+            latex: false,
+            markdown: false,
+            docx: false,
+            xlsx: true,
+        };
         assert!(formats.any_selected());
     }
 }
