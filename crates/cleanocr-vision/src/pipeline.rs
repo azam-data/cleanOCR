@@ -58,6 +58,7 @@ pub struct PageAnalysisInput<'a> {
 pub struct PageVisionOutput {
     pub page_ir: PageIr,
     pub figures: BTreeMap<String, Vec<u8>>,
+    pub table_grid_mask: Option<Vec<u8>>,
 }
 
 /// Analyzes a single page into a reading-order-sorted `PageIr` and cropped figure assets.
@@ -171,7 +172,11 @@ pub fn analyze_page_with_recognizer<R: TextRecognizer + ?Sized>(
         low_confidence_flags,
     };
 
-    Ok(PageVisionOutput { page_ir, figures })
+    Ok(PageVisionOutput {
+        page_ir,
+        figures,
+        table_grid_mask,
+    })
 }
 
 /// Converts native PDF text into normalized semantic `Heading` and `Paragraph` blocks.

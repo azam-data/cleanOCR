@@ -8,9 +8,9 @@ use cleanocr_export::{
     DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PageVisualAssets,
     PdfExporter, XlsxExporter, extract_ir_from_file,
 };
-use cleanocr_ingest::{IngestConfig, ingest_document};
+use cleanocr_ingest::{IngestConfig, ingest_document_streaming};
 use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
-use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
+use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc, should_bypass_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
     OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
@@ -223,12 +223,14 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
         "Starting cleanOCR processing pipeline"
     );
 
-    // 1. Ingest document (smart PDF router + hayro render + deskew/illumination).
+    // 1. Lazily stream document pages (smart PDF router + hayro render + deskew/illumination).
     let ingest_cfg = IngestConfig {
         dpi: args.dpi,
         ..IngestConfig::default()
     };
-    let ingested = ingest_document(&args.input, &ingest_cfg)?;
+    let mut stream = ingest_document_streaming(&args.input, &ingest_cfg)?;
+    let source_sha256 = stream.source_sha256.clone();
+    let source_filename = stream.source_filename.clone();
 
     let vision_cfg = VisionConfig {
         profile: match args.accuracy {
@@ -245,11 +247,12 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
         .map(OcrEngine::from_model_dir)
         .transpose()?;
 
-    let mut page_irs = Vec::with_capacity(ingested.pages.len());
-    let mut page_assets = Vec::with_capacity(ingested.pages.len());
+    let mut page_irs = Vec::with_capacity(stream.total_pages);
+    let mut page_assets = Vec::with_capacity(stream.total_pages);
 
-    // 2. Vision layout/OCR analysis + 3-layer MRC compression per page.
-    for page in &ingested.pages {
+    // 2. Vision layout/OCR analysis + 4-layer MRC compression page-by-page (drops RgbImage immediately).
+    for page_res in &mut stream {
+        let page = page_res?;
         let vision_out = analyze_page(
             &PageAnalysisInput {
                 page_index: page.page_index,
@@ -272,32 +275,30 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
             .map(|b| b.bbox)
             .collect();
 
-        let (mrc, fallback_raster_jpeg) = match args.mrc {
-            MrcProfile::None => {
+        let (mrc, fallback_raster_jpeg) =
+            if args.mrc == MrcProfile::None || should_bypass_mrc(&figure_boxes) {
                 let full_jpg = crop_bbox_to_jpeg(&page.image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)?;
                 (None, Some(full_jpg))
-            }
-            MrcProfile::Lossless => {
+            } else {
+                let profile = match args.mrc {
+                    MrcProfile::Lossless => MrcCompressionProfile::Lossless,
+                    MrcProfile::BookMax => MrcCompressionProfile::BookMax,
+                    MrcProfile::None => unreachable!(),
+                };
                 let mrc_cfg = MrcConfig {
-                    profile: MrcCompressionProfile::Lossless,
+                    profile,
                     ..MrcConfig::default()
                 };
                 (
-                    Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?),
+                    Some(decompose_mrc(
+                        &page.image,
+                        &figure_boxes,
+                        vision_out.table_grid_mask.as_deref(),
+                        &mrc_cfg,
+                    )?),
                     None,
                 )
-            }
-            MrcProfile::BookMax => {
-                let mrc_cfg = MrcConfig {
-                    profile: MrcCompressionProfile::BookMax,
-                    ..MrcConfig::default()
-                };
-                (
-                    Some(decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?),
-                    None,
-                )
-            }
-        };
+            };
 
         page_assets.push(PageVisualAssets {
             page_index: page.page_index,
@@ -306,6 +307,7 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
             figures: vision_out.figures,
         });
         page_irs.push(vision_out.page_ir);
+        drop(page);
     }
 
     // 3. Assemble canonical DocumentIr.
@@ -320,8 +322,8 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
         schema_version: IR_SCHEMA_VERSION.to_string(),
         metadata: DocumentMetadata {
             title: Some(stem.to_string()),
-            source_sha256: ingested.source_sha256,
-            source_filename: ingested.source_filename,
+            source_sha256,
+            source_filename,
             detected_languages: vec!["en".to_string()],
             created_utc: "2026-11-24T00:00:00Z".to_string(),
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -470,7 +472,12 @@ fn run_scan(args: &ScanArgs) -> Result<()> {
                 .map(|b| b.bbox)
                 .collect();
 
-            let mrc = decompose_mrc(&page.image, &figure_boxes, &mrc_cfg)?;
+            let mrc = decompose_mrc(
+                &page.image,
+                &figure_boxes,
+                vision_out.table_grid_mask.as_deref(),
+                &mrc_cfg,
+            )?;
             page_assets.push(PageVisualAssets {
                 page_index: idx,
                 mrc: Some(mrc),

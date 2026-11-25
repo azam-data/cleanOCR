@@ -10,9 +10,9 @@ use cleanocr_export::{
     DocxExporter, Exporter, HtmlExporter, LatexExporter, MarkdownExporter, PageVisualAssets,
     PdfExporter, XlsxExporter,
 };
-use cleanocr_ingest::{IngestConfig, ingest_document};
+use cleanocr_ingest::{IngestConfig, ingest_document_streaming};
 use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSION};
-use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
+use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc, should_bypass_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
     OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
@@ -390,13 +390,16 @@ fn run_file_pipeline(
 
     send_progress(
         0.10,
-        format!("Ingesting {} at {} DPI...", input.display(), dpi),
+        format!("Streaming {} at {} DPI...", input.display(), dpi),
     );
     let ingest_cfg = IngestConfig {
         dpi,
         ..IngestConfig::default()
     };
-    let ingested = ingest_document(input, &ingest_cfg).map_err(|e| e.to_string())?;
+    let mut stream = ingest_document_streaming(input, &ingest_cfg).map_err(|e| e.to_string())?;
+    let source_sha256 = stream.source_sha256.clone();
+    let source_filename = stream.source_filename.clone();
+    let total_pages = stream.total_pages.max(1);
 
     let vision_cfg = VisionConfig {
         profile: match accuracy {
@@ -414,11 +417,11 @@ fn run_file_pipeline(
         .transpose()
         .map_err(|e| e.to_string())?;
 
-    let total_pages = ingested.pages.len().max(1);
-    let mut page_irs = Vec::with_capacity(ingested.pages.len());
-    let mut page_assets = Vec::with_capacity(ingested.pages.len());
+    let mut page_irs = Vec::with_capacity(total_pages);
+    let mut page_assets = Vec::with_capacity(total_pages);
 
-    for (idx, page) in ingested.pages.iter().enumerate() {
+    for (idx, page_res) in (&mut stream).enumerate() {
+        let page = page_res.map_err(|e| e.to_string())?;
         let frac = 0.15 + 0.65 * (idx as f32 / total_pages as f32);
         send_progress(
             frac,
@@ -452,11 +455,17 @@ fn run_file_pipeline(
             .map(|b| b.bbox)
             .collect();
 
-        let mut assets =
-            build_page_assets(page.page_index, &page.image, &figure_boxes, mrc_profile)?;
+        let mut assets = build_page_assets(
+            page.page_index,
+            &page.image,
+            &figure_boxes,
+            vision_out.table_grid_mask.as_deref(),
+            mrc_profile,
+        )?;
         assets.figures = vision_out.figures;
         page_assets.push(assets);
         page_irs.push(vision_out.page_ir);
+        drop(page);
     }
 
     let stem = input
@@ -469,8 +478,8 @@ fn run_file_pipeline(
         schema_version: IR_SCHEMA_VERSION.to_string(),
         metadata: DocumentMetadata {
             title: Some(stem.to_string()),
-            source_sha256: ingested.source_sha256,
-            source_filename: ingested.source_filename,
+            source_sha256,
+            source_filename,
             detected_languages: vec!["en".to_string()],
             created_utc: "2026-11-24T00:00:00Z".to_string(),
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -568,7 +577,13 @@ fn run_scan_pipeline(
                 .map(|b| b.bbox)
                 .collect();
 
-            let mut assets = build_page_assets(idx, &page.image, &figure_boxes, mrc_profile)?;
+            let mut assets = build_page_assets(
+                idx,
+                &page.image,
+                &figure_boxes,
+                vision_out.table_grid_mask.as_deref(),
+                mrc_profile,
+            )?;
             assets.figures = vision_out.figures;
             page_assets.push(assets);
             page_irs.push(vision_out.page_ir);
@@ -596,35 +611,32 @@ fn build_page_assets(
     page_index: usize,
     image: &image::RgbImage,
     figure_boxes: &[BBox],
+    table_grid_mask: Option<&[u8]>,
     profile: MrcProfile,
 ) -> Result<PageVisualAssets, String> {
-    let (mrc, fallback_raster_jpeg) = match profile {
-        MrcProfile::None => {
+    let (mrc, fallback_raster_jpeg) =
+        if profile == MrcProfile::None || should_bypass_mrc(figure_boxes) {
             let full_jpg = crop_bbox_to_jpeg(image, BBox::new(0.0, 0.0, 1.0, 1.0), 85)
                 .map_err(|e| e.to_string())?;
             (None, Some(full_jpg))
-        }
-        MrcProfile::Lossless => {
+        } else {
+            let mrc_profile = match profile {
+                MrcProfile::Lossless => MrcCompressionProfile::Lossless,
+                MrcProfile::BookMax => MrcCompressionProfile::BookMax,
+                MrcProfile::None => unreachable!(),
+            };
             let mrc_cfg = MrcConfig {
-                profile: MrcCompressionProfile::Lossless,
+                profile: mrc_profile,
                 ..MrcConfig::default()
             };
             (
-                Some(decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?),
+                Some(
+                    decompose_mrc(image, figure_boxes, table_grid_mask, &mrc_cfg)
+                        .map_err(|e| e.to_string())?,
+                ),
                 None,
             )
-        }
-        MrcProfile::BookMax => {
-            let mrc_cfg = MrcConfig {
-                profile: MrcCompressionProfile::BookMax,
-                ..MrcConfig::default()
-            };
-            (
-                Some(decompose_mrc(image, figure_boxes, &mrc_cfg).map_err(|e| e.to_string())?),
-                None,
-            )
-        }
-    };
+        };
 
     Ok(PageVisualAssets {
         page_index,

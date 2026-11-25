@@ -174,7 +174,7 @@ pub fn extract_ink_mask(
             let threshold = mean * (1.0 + k * (std_dev / r_dyn - 1.0));
 
             let lum = luma[idx] as f64;
-            let is_sauvola_ink = lum < threshold && (mean - lum) > 8.0;
+            let is_sauvola_ink = lum < threshold && (mean - lum) > 28.0;
 
             let dr = raw[idx * 3] as f32 - paper_r;
             let dg = raw[idx * 3 + 1] as f32 - paper_g;
@@ -182,8 +182,15 @@ pub fn extract_ink_mask(
             let max_ch = raw[idx * 3].max(raw[idx * 3 + 1]).max(raw[idx * 3 + 2]);
             let min_ch = raw[idx * 3].min(raw[idx * 3 + 1]).min(raw[idx * 3 + 2]);
             let chroma = (max_ch - min_ch) as f32;
+            let sat = if max_ch > 0 {
+                chroma / max_ch as f32
+            } else {
+                0.0
+            };
             let dist_sq = dr * dr + dg * dg + db * db;
-            let is_colored_ink = chroma > 24.0 && dist_sq > color_thresh_sq;
+            let is_colored_ink = chroma > 28.0
+                && dist_sq > color_thresh_sq
+                && (sat > 0.35 || lum < 170.0 || (mean - lum) > 20.0);
 
             *out_px = is_sauvola_ink || is_colored_ink;
         }
@@ -308,6 +315,35 @@ mod tests {
         assert_eq!(
             packed,
             vec![0b1000_0001, 0b1000_0000, 0b0100_0000, 0b0000_0000]
+        );
+    }
+
+    #[test]
+    fn shaded_header_keeps_black_text_and_excludes_gray_shade() {
+        let mut img = RgbImage::from_pixel(160, 100, Rgb([252, 252, 252]));
+
+        // Light gray-blue shaded header bar (y: 15..55).
+        for y in 15..55 {
+            for x in 10..150 {
+                img.put_pixel(x, y, Rgb([215, 224, 238]));
+            }
+        }
+
+        // Crisp black text stroke inside the shaded header bar (y: 28..40, x: 40..90).
+        for y in 28..40 {
+            for x in 40..90 {
+                img.put_pixel(x, y, Rgb([15, 15, 15]));
+            }
+        }
+
+        let mask = extract_ink_mask(&img, &[], &BinarizeConfig::default());
+        assert!(
+            mask[34 * 160 + 60],
+            "black text inside shaded header must enter ink_mask"
+        );
+        assert!(
+            !mask[20 * 160 + 25],
+            "shaded header background must stay out of ink_mask"
         );
     }
 }

@@ -756,6 +756,7 @@ mod tests {
                 width: 100,
                 height: 100,
                 mask_jbig2: vec![1, 2, 3],
+                table_jbig2: None,
                 mask_png_1bit: vec![137, 80, 78, 71],
                 fg_jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9],
                 fg_width: 34,

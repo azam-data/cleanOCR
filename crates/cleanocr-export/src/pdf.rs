@@ -663,6 +663,7 @@ mod tests {
                 width: 600,
                 height: 800,
                 mask_jbig2: vec![0x97, 0x4A, 0x42, 0x32],
+                table_jbig2: None,
                 mask_png_1bit: vec![137, 80, 78, 71],
                 fg_jpeg: vec![0xFF, 0xD8, 0xFF, 0xD9],
                 fg_width: 200,
