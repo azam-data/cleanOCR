@@ -3,11 +3,15 @@
 pub mod assets;
 pub mod ocr_engine;
 pub mod pipeline;
+pub mod table_lattice;
 
 pub use assets::{crop_bbox_to_jpeg, crop_bbox_to_png, vectorize_overlay_svg};
 pub use ocr_engine::{OcrEngine, OcrModelPaths, discover_default_models_dir};
 pub use pipeline::{
     PageAnalysisInput, PageVisionOutput, VisionConfig, VisionProfile, analyze_page,
+};
+pub use table_lattice::{
+    DetectedCell, DetectedTableGrid, LatticeDetectionResult, LineSegment, detect_lattice_tables,
 };
 
 #[cfg(test)]
