@@ -1,12 +1,14 @@
 //! Layout detection, OCR, table structure, formula recognition, and asset extraction.
 
 pub mod assets;
+pub mod graphics;
 pub mod ocr_engine;
 pub mod pipeline;
 pub mod table_lattice;
 pub mod table_stream;
 
 pub use assets::{crop_bbox_to_jpeg, crop_bbox_to_png, vectorize_overlay_svg};
+pub use graphics::{DetectedGraphic, GraphicKind, detect_and_crop_graphics, detect_graphics};
 pub use ocr_engine::{OcrEngine, OcrModelPaths, TextRecognizer, discover_default_models_dir};
 pub use pipeline::{
     PageAnalysisInput, PageVisionOutput, VisionConfig, VisionProfile, analyze_page,

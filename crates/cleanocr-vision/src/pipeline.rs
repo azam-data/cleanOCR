@@ -9,6 +9,7 @@ use cleanocr_ir::{
 use image::RgbImage;
 
 use crate::assets::crop_bbox_to_png;
+use crate::graphics::detect_and_crop_graphics;
 use crate::ocr_engine::{OcrEngine, TextRecognizer};
 use crate::table_lattice::{crop_cell_padded, detect_lattice_tables, erase_table_grid_lines};
 use crate::table_stream::detect_stream_tables;
@@ -81,6 +82,7 @@ pub fn analyze_page_with_recognizer<R: TextRecognizer + ?Sized>(
 ) -> Result<PageVisionOutput> {
     let mut blocks = Vec::new();
     let mut figures = BTreeMap::new();
+    let mut table_grid_mask: Option<Vec<u8>> = None;
 
     match input.ingest_mode {
         PageIngestMode::DigitalNativeText => {
@@ -94,10 +96,16 @@ pub fn analyze_page_with_recognizer<R: TextRecognizer + ?Sized>(
             }
             if blocks.is_empty() {
                 if let Some(rec) = recognizer {
-                    blocks = recognize_with_lattice_tables(input.image, input.page_index, rec)?;
+                    let (b, mask) =
+                        recognize_with_lattice_tables(input.image, input.page_index, rec)?;
+                    blocks = b;
+                    table_grid_mask = mask;
                 } else if let Some(model_dir) = &config.model_dir {
                     let engine = OcrEngine::from_model_dir(model_dir)?;
-                    blocks = recognize_with_lattice_tables(input.image, input.page_index, &engine)?;
+                    let (b, mask) =
+                        recognize_with_lattice_tables(input.image, input.page_index, &engine)?;
+                    blocks = b;
+                    table_grid_mask = mask;
                 } else {
                     detect_raster_regions(input, &mut blocks, &mut figures)?;
                 }
@@ -105,10 +113,15 @@ pub fn analyze_page_with_recognizer<R: TextRecognizer + ?Sized>(
         }
         PageIngestMode::ScannedRaster => {
             if let Some(rec) = recognizer {
-                blocks = recognize_with_lattice_tables(input.image, input.page_index, rec)?;
+                let (b, mask) = recognize_with_lattice_tables(input.image, input.page_index, rec)?;
+                blocks = b;
+                table_grid_mask = mask;
             } else if let Some(model_dir) = &config.model_dir {
                 let engine = OcrEngine::from_model_dir(model_dir)?;
-                blocks = recognize_with_lattice_tables(input.image, input.page_index, &engine)?;
+                let (b, mask) =
+                    recognize_with_lattice_tables(input.image, input.page_index, &engine)?;
+                blocks = b;
+                table_grid_mask = mask;
             } else {
                 detect_raster_regions(input, &mut blocks, &mut figures)?;
             }
@@ -116,6 +129,19 @@ pub fn analyze_page_with_recognizer<R: TextRecognizer + ?Sized>(
     }
 
     blocks = detect_stream_tables(blocks, input.page_index);
+
+    if input.ingest_mode != PageIngestMode::DigitalNativeText
+        && (recognizer.is_some() || config.model_dir.is_some())
+    {
+        let fig_blocks = detect_and_crop_graphics(
+            input.image,
+            &blocks,
+            table_grid_mask.as_deref(),
+            input.page_index,
+            &mut figures,
+        )?;
+        blocks.extend(fig_blocks);
+    }
 
     // Enforce canonical Recursive XY-Cut reading order on every page.
     sort_reading_order(&mut blocks);
@@ -287,10 +313,10 @@ fn recognize_with_lattice_tables<R: TextRecognizer + ?Sized>(
     img: &RgbImage,
     page_index: usize,
     recognizer: &R,
-) -> Result<Vec<Block>> {
+) -> Result<(Vec<Block>, Option<Vec<u8>>)> {
     let lattice = detect_lattice_tables(img);
     if lattice.tables.is_empty() {
-        return recognizer.recognize_page(img, page_index);
+        return Ok((recognizer.recognize_page(img, page_index)?, None));
     }
 
     let cleaned = erase_table_grid_lines(img, &lattice.table_grid_mask);
@@ -355,7 +381,7 @@ fn recognize_with_lattice_tables<R: TextRecognizer + ?Sized>(
         });
     }
 
-    Ok(blocks)
+    Ok((blocks, Some(lattice.table_grid_mask)))
 }
 
 #[cfg(test)]
