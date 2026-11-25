@@ -47,6 +47,7 @@ oar-ocr = { version = "0.11.0", features = ["auto-download"] }
 
 # Document Exporters
 docx-rs = "0.4.22"
+rust_xlsxwriter = "0.80"
 
 # CLI & Async (Phase 2 eSCL Scanner)
 clap = { version = "4.5", features = ["derive"] }

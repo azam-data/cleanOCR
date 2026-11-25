@@ -7,6 +7,7 @@ pub mod latex_math;
 pub mod latex_pgfplots;
 pub mod markdown;
 pub mod pdf;
+pub mod xlsx;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -25,6 +26,7 @@ pub use latex_math::{
 pub use latex_pgfplots::{emit_pgfplots, is_supported_pgfplots_chart};
 pub use markdown::{MarkdownExporter, render_markdown};
 pub use pdf::{PdfExporter, bbox_to_pdf_rect, build_pdf_bytes, extract_ir_from_pdf};
+pub use xlsx::{ExcelCellValue, XlsxExporter, build_xlsx_bytes, parse_excel_cell};
 
 /// Per-page raster, MRC, and cropped figure visual assets paired with a `PageIr`.
 #[derive(Debug, Clone, Default)]
