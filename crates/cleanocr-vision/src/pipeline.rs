@@ -65,6 +65,7 @@ pub struct PageVisionOutput {
 pub fn analyze_page(
     input: &PageAnalysisInput<'_>,
     config: &VisionConfig,
+    ocr_engine: Option<&OcrEngine>,
 ) -> Result<PageVisionOutput> {
     let mut blocks = Vec::new();
     let mut figures = BTreeMap::new();
@@ -80,7 +81,9 @@ pub fn analyze_page(
                 blocks = structure_native_text(input.page_index, text);
             }
             if blocks.is_empty() {
-                if let Some(model_dir) = &config.model_dir {
+                if let Some(engine) = ocr_engine {
+                    blocks = engine.recognize_page(input.image, input.page_index)?;
+                } else if let Some(model_dir) = &config.model_dir {
                     let engine = OcrEngine::from_model_dir(model_dir)?;
                     blocks = engine.recognize_page(input.image, input.page_index)?;
                 } else {
@@ -89,7 +92,9 @@ pub fn analyze_page(
             }
         }
         PageIngestMode::ScannedRaster => {
-            if let Some(model_dir) = &config.model_dir {
+            if let Some(engine) = ocr_engine {
+                blocks = engine.recognize_page(input.image, input.page_index)?;
+            } else if let Some(model_dir) = &config.model_dir {
                 let engine = OcrEngine::from_model_dir(model_dir)?;
                 blocks = engine.recognize_page(input.image, input.page_index)?;
             } else {

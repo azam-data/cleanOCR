@@ -102,7 +102,7 @@ pub fn ingest_bytes(
         }
 
         let mut pages = Vec::with_capacity(classifications.len());
-        for (cls, raw_img) in classifications.into_iter().zip(rendered_pages.into_iter()) {
+        for (cls, raw_img) in classifications.into_iter().zip(rendered_pages) {
             let (image, detected_skew_deg) = if cls.mode == PageIngestMode::ScannedRaster {
                 let pre = preprocess_raster(&raw_img, &config.preprocess);
                 (pre.image, pre.detected_skew_deg)

@@ -13,7 +13,7 @@ use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSI
 use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
-    PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -237,6 +237,12 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
         ..VisionConfig::default()
     };
 
+    let ocr_engine = vision_cfg
+        .model_dir
+        .as_deref()
+        .map(OcrEngine::from_model_dir)
+        .transpose()?;
+
     let mut page_irs = Vec::with_capacity(ingested.pages.len());
     let mut page_assets = Vec::with_capacity(ingested.pages.len());
 
@@ -253,6 +259,7 @@ fn run_process(args: &ProcessArgs) -> Result<()> {
                 native_text: page.native_text.as_deref(),
             },
             &vision_cfg,
+            ocr_engine.as_ref(),
         )?;
 
         let figure_boxes: Vec<BBox> = vision_out
@@ -445,6 +452,7 @@ fn run_scan(args: &ScanArgs) -> Result<()> {
                     native_text: page.native_text.as_deref(),
                 },
                 &vision_cfg,
+                None,
             )?;
 
             let figure_boxes: Vec<BBox> = vision_out

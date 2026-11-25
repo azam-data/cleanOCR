@@ -32,7 +32,6 @@ zip = "2.2"
 # Image & Vector Processing
 image = "0.25"
 imageproc = "0.25"
-zune-jpeg = "0.4"
 png = "0.17"
 jbig2enc-rust = { version = "0.5.4", default-features = false, features = ["encode", "symboldict", "parallel"] }
 vtracer = "0.6.3"
@@ -45,7 +44,6 @@ pdf-writer = "0.15.0"
 
 # ML / OCR / Layout (ONNX Runtime + Candle VLMs)
 oar-ocr = { version = "0.11.0", features = ["auto-download"] }
-ort = "2.0.0-rc.15"
 
 # Document Exporters
 docx-rs = "0.4.22"

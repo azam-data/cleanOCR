@@ -107,14 +107,13 @@ pub fn extract_ink_mask(
         }
     }
 
-    let (paper_r, paper_g, paper_b) = if bright_count > 0 {
-        (
-            (sum_r / bright_count) as f32,
-            (sum_g / bright_count) as f32,
-            (sum_b / bright_count) as f32,
-        )
-    } else {
-        (250.0, 250.0, 250.0)
+    let (paper_r, paper_g, paper_b) = match (
+        sum_r.checked_div(bright_count),
+        sum_g.checked_div(bright_count),
+        sum_b.checked_div(bright_count),
+    ) {
+        (Some(r), Some(g), Some(b)) => (r as f32, g as f32, b as f32),
+        _ => (250.0, 250.0, 250.0),
     };
 
     // 2. Build (w + 1) x (h + 1) 64-bit summed-area tables for O(1) Sauvola mean & variance.
@@ -151,10 +150,10 @@ pub fn extract_ink_mask(
         let row_top = y0 * stride;
         let row_bot = (y1 + 1) * stride;
 
-        for x in 0..w {
+        for (x, out_px) in row_out.iter_mut().enumerate().take(w) {
             let idx = y * w + x;
             if photo_mask[idx] {
-                row_out[x] = false;
+                *out_px = false;
                 continue;
             }
 
@@ -186,7 +185,7 @@ pub fn extract_ink_mask(
             let dist_sq = dr * dr + dg * dg + db * db;
             let is_colored_ink = chroma > 24.0 && dist_sq > color_thresh_sq;
 
-            row_out[x] = is_sauvola_ink || is_colored_ink;
+            *out_px = is_sauvola_ink || is_colored_ink;
         }
     });
 

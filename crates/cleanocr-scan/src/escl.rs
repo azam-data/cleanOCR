@@ -100,10 +100,10 @@ pub fn parse_scanner_capabilities(xml: &str) -> Result<ScannerCapabilities> {
                 }
                 match current_tag.as_str() {
                     "MakeAndModel" => caps.make_and_model = Some(text),
-                    "DocumentFormat" | "DocumentFormatExt" => {
-                        if !caps.supported_formats.contains(&text) {
-                            caps.supported_formats.push(text);
-                        }
+                    "DocumentFormat" | "DocumentFormatExt"
+                        if !caps.supported_formats.contains(&text) =>
+                    {
+                        caps.supported_formats.push(text);
                     }
                     _ => {}
                 }

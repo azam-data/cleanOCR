@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
@@ -15,7 +15,7 @@ use cleanocr_ir::{BBox, BlockKind, DocumentIr, DocumentMetadata, IR_SCHEMA_VERSI
 use cleanocr_mrc::{MrcCompressionProfile, MrcConfig, decompose_mrc};
 use cleanocr_scan::{ScanInputSource, ScanJobRequest, discover_scanners, scan_and_ingest};
 use cleanocr_vision::{
-    PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
+    OcrEngine, PageAnalysisInput, VisionConfig, VisionProfile, analyze_page, crop_bbox_to_jpeg,
 };
 use eframe::egui;
 
@@ -370,8 +370,8 @@ impl CleanOcrApp {
 
 #[allow(clippy::too_many_arguments)]
 fn run_file_pipeline(
-    input: &PathBuf,
-    out_dir: &PathBuf,
+    input: &Path,
+    out_dir: &Path,
     formats: &ExportFormats,
     mrc_profile: MrcProfile,
     accuracy: AccuracyProfile,
@@ -404,6 +404,13 @@ fn run_file_pipeline(
         ..VisionConfig::default()
     };
 
+    let ocr_engine = vision_cfg
+        .model_dir
+        .as_deref()
+        .map(OcrEngine::from_model_dir)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+
     let total_pages = ingested.pages.len().max(1);
     let mut page_irs = Vec::with_capacity(ingested.pages.len());
     let mut page_assets = Vec::with_capacity(ingested.pages.len());
@@ -430,6 +437,7 @@ fn run_file_pipeline(
                 native_text: page.native_text.as_deref(),
             },
             &vision_cfg,
+            ocr_engine.as_ref(),
         )
         .map_err(|e| e.to_string())?;
 
@@ -475,7 +483,7 @@ fn run_file_pipeline(
 fn run_scan_pipeline(
     base_url: &str,
     source: ScanSourceUi,
-    out_dir: &PathBuf,
+    out_dir: &Path,
     formats: &ExportFormats,
     mrc_profile: MrcProfile,
     accuracy: AccuracyProfile,
@@ -515,6 +523,13 @@ fn run_scan_pipeline(
         ..VisionConfig::default()
     };
 
+    let ocr_engine = vision_cfg
+        .model_dir
+        .as_deref()
+        .map(OcrEngine::from_model_dir)
+        .transpose()
+        .map_err(|e| e.to_string())?;
+
     let total_pages = scanned_docs.len().max(1);
     let mut page_irs = Vec::with_capacity(scanned_docs.len());
     let mut page_assets = Vec::with_capacity(scanned_docs.len());
@@ -538,6 +553,7 @@ fn run_scan_pipeline(
                     native_text: page.native_text.as_deref(),
                 },
                 &vision_cfg,
+                ocr_engine.as_ref(),
             )
             .map_err(|e| e.to_string())?;
 
@@ -618,7 +634,7 @@ fn build_page_assets(
 fn export_all(
     doc_ir: &DocumentIr,
     page_assets: &[PageVisualAssets],
-    out_dir: &PathBuf,
+    out_dir: &Path,
     stem: &str,
     formats: &ExportFormats,
 ) -> Result<String, String> {

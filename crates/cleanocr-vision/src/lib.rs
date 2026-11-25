@@ -5,7 +5,7 @@ pub mod ocr_engine;
 pub mod pipeline;
 
 pub use assets::{crop_bbox_to_jpeg, crop_bbox_to_png, vectorize_overlay_svg};
-pub use ocr_engine::{OcrEngine, OcrModelPaths};
+pub use ocr_engine::{OcrEngine, OcrModelPaths, discover_default_models_dir};
 pub use pipeline::{
     PageAnalysisInput, PageVisionOutput, VisionConfig, VisionProfile, analyze_page,
 };
@@ -29,7 +29,8 @@ mod tests {
             native_text: Some("Quarterly Financial Report\nRevenue grew by 18% year over year."),
         };
 
-        let out = analyze_page(&input, &VisionConfig::default()).expect("analyze native page");
+        let out =
+            analyze_page(&input, &VisionConfig::default(), None).expect("analyze native page");
         assert_eq!(out.page_ir.blocks.len(), 2);
         assert!(matches!(
             out.page_ir.blocks[0].kind,
@@ -61,7 +62,8 @@ mod tests {
             native_text: None,
         };
 
-        let out = analyze_page(&input, &VisionConfig::default()).expect("analyze scanned page");
+        let out =
+            analyze_page(&input, &VisionConfig::default(), None).expect("analyze scanned page");
         assert_eq!(out.page_ir.blocks.len(), 1);
         assert_eq!(out.figures.len(), 1);
         assert_eq!(out.page_ir.low_confidence_flags.len(), 1);

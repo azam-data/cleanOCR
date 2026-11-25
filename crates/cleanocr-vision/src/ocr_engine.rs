@@ -5,6 +5,26 @@ use cleanocr_ir::{BBox, Block, BlockKind, TextLine, TextSource, TextSpan};
 use image::RgbImage;
 use oar_ocr::oarocr::{OAROCR, OAROCRBuilder};
 
+/// Checks `./models` next to the current executable (and in the current working directory),
+/// returning `Some(dir)` if valid ONNX OCR model files are discovered inside it.
+pub fn discover_default_models_dir() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        let candidate = exe_dir.join("models");
+        if OcrModelPaths::discover_in_dir(&candidate).is_ok() {
+            return Some(candidate);
+        }
+    }
+
+    let cwd_candidate = PathBuf::from("models");
+    if OcrModelPaths::discover_in_dir(&cwd_candidate).is_ok() {
+        return Some(cwd_candidate);
+    }
+
+    None
+}
+
 /// Resolved local file paths for ONNX text detection, text recognition, and character dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OcrModelPaths {

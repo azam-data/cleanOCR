@@ -37,7 +37,8 @@ pub fn pull_push_inpaint(img: &RgbImage, known: &[bool]) -> RgbImage {
     }
 
     // 1. Pull phase: build downsampled pyramid until 1x1 so every hole gets a valid ancestor.
-    let mut pyramid: Vec<(usize, usize, Vec<[f32; 3]>, Vec<f32>)> = Vec::new();
+    type PyramidLevel = (usize, usize, Vec<[f32; 3]>, Vec<f32>);
+    let mut pyramid: Vec<PyramidLevel> = Vec::new();
     pyramid.push((w, h, base_rgb, base_w));
 
     loop {
